@@ -1,6 +1,6 @@
 import type React from "react"
 import { Inter } from "next/font/google"
-import { ThemeProvider } from "@/components/theme-provider"
+import { ThemeProvider } from "next-themes"
 import { Toaster } from "@/components/ui/toaster"
 import "./globals.css"
 
@@ -9,7 +9,7 @@ const inter = Inter({ subsets: ["latin"] })
 export const metadata = {
   title: "PT HANG TONG MANUFACTORY - Employee Management System",
   description: "Employee Management System for PT HANG TONG MANUFACTORY",
-    generator: 'v0.dev'
+    generator: 'Jo'
 }
 
 export default function RootLayout({

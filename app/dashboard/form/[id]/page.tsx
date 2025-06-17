@@ -9,16 +9,19 @@ export default async function FormDetailsPage({
 }: {
   params: { id: string }
 }) {
+  // Await params to ensure they are fully resolved
+  const { id } = await params
+
   const session = await getServerSession(authOptions)
 
   if (!session) {
     redirect("/")
   }
 
-  const formId = params.id
+  const formId = id // Use the awaited id
 
   // Fetch form data
-  const form = await prisma.form.findUnique({
+  const form = await prisma.form.findUnique({ 
     where: { id: formId },
     include: {
       employee: true,
@@ -38,7 +41,7 @@ export default async function FormDetailsPage({
   const userRole = session.user.role
   const userId = session.user.id
 
-  const hasAccess = userRole === "admin" || (userRole === "leader" && form.employeeId === userId) || userRole === "hrd"
+  const hasAccess = userRole === "admin" || (userRole === "leader" && form.employeeId === userId) || userRole === "hrd" || userRole === "pmc"
 
   if (!hasAccess) {
     redirect("/dashboard")
@@ -50,3 +53,4 @@ export default async function FormDetailsPage({
     </main>
   )
 }
+

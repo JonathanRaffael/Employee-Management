@@ -1,16 +1,40 @@
-import type { NextAuthOptions } from "next-auth"
+import type { NextAuthOptions, DefaultSession } from "next-auth"
 import CredentialsProvider from "next-auth/providers/credentials"
-import { PrismaAdapter } from "@auth/prisma-adapter"
+import { PrismaAdapter } from "@next-auth/prisma-adapter"
 import { prisma } from "@/lib/prisma"
-import { compare } from "bcrypt"
+import { compare } from "bcryptjs"
+
+// ✅ Extend the built-in session and user types without duplicating existing fields
+declare module "next-auth" {
+  interface Session {
+    user: {
+      id: string
+      role: string
+    } & DefaultSession["user"]
+  }
+
+  interface User {
+    id: string
+    role: string
+  }
+}
+
+declare module "next-auth/jwt" {
+  interface JWT {
+    id: string
+    role: string
+  }
+}
 
 export const authOptions: NextAuthOptions = {
   adapter: PrismaAdapter(prisma),
+  secret: process.env.NEXTAUTH_SECRET,
   session: {
     strategy: "jwt",
   },
   pages: {
-    signIn: "/",
+    signIn: "/login",
+    error: "/login",
   },
   providers: [
     CredentialsProvider({
@@ -25,18 +49,15 @@ export const authOptions: NextAuthOptions = {
         }
 
         const user = await prisma.user.findUnique({
-          where: {
-            email: credentials.email,
-          },
+          where: { email: credentials.email },
         })
 
-        if (!user) {
+        if (!user || !user.password) {
           return null
         }
 
-        const passwordValid = await compare(credentials.password, user.password)
-
-        if (!passwordValid) {
+        const isPasswordValid = await compare(credentials.password, user.password)
+        if (!isPasswordValid) {
           return null
         }
 
@@ -45,9 +66,6 @@ export const authOptions: NextAuthOptions = {
           email: user.email,
           name: user.name,
           role: user.role,
-          employeeId: user.employeeId,
-          department: user.department,
-          position: user.position,
         }
       },
     }),
@@ -55,29 +73,17 @@ export const authOptions: NextAuthOptions = {
   callbacks: {
     async jwt({ token, user }) {
       if (user) {
-        return {
-          ...token,
-          id: user.id,
-          role: user.role,
-          employeeId: user.employeeId,
-          department: user.department,
-          position: user.position,
-        }
+        token.id = user.id
+        token.role = user.role
       }
       return token
     },
     async session({ session, token }) {
-      return {
-        ...session,
-        user: {
-          ...session.user,
-          id: token.id,
-          role: token.role,
-          employeeId: token.employeeId,
-          department: token.department,
-          position: token.position,
-        },
+      if (token) {
+        session.user.id = token.id as string
+        session.user.role = token.role as string
       }
+      return session
     },
   },
 }

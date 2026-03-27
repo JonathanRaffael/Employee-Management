@@ -32,10 +32,10 @@ export default function FormStatusBadge({ status, className, customText }: FormS
         "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300 hover:bg-blue-200 dark:hover:bg-blue-800/30"
       badgeText = customText || "Waiting for HRD approval"
       break
-    case "pending_pmc":
+    case "pending_supervisor":
       badgeClass =
         "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300 hover:bg-amber-200 dark:hover:bg-amber-800/30"
-      badgeText = customText || "Waiting for PMC approval"
+      badgeText = customText || "Waiting for supervisor approval"
       break
     case "pending":
     default:

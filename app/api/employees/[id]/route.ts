@@ -1,42 +1,71 @@
-import { NextResponse } from 'next/server';
-import { PrismaClient } from '@prisma/client';
+import { NextResponse, type NextRequest } from "next/server"
+import { prisma } from "@/lib/prisma"
 
-const prisma = new PrismaClient();
-
-// GET employee by ID
 export async function GET(
-  request: Request,
-  { params }: { params: { id: string } }
+  _req: NextRequest,
+  context: { params: Promise<{ id: string }> }
 ) {
-  try {
-    const employee = await prisma.user.findUnique({
-      where: {
-        id: params.id
-      },
-      select: {
-        id: true,
-        name: true,
-        employeeId: true,
-        department: true,
-        position: true,
-        jatahcuti: true,
-        cutiterpakai: true
-      }
-    });
+  const { id } = await context.params
+  const year = new Date().getFullYear()
 
-    if (!employee) {
-      return NextResponse.json(
-        { error: 'Employee not found' },
-        { status: 404 }
-      );
-    }
+  /**
+   * 1️⃣ Ambil employee (PK INTERNAL)
+   */
+  const employee = await prisma.employee.findUnique({
+    where: { id },
+    select: {
+      id: true,
+      employeeCode: true,
+      name: true,
+      department: true,
+      position: true,
+      isActive: true,
+    },
+  })
 
-    return NextResponse.json(employee);
-  } catch (error) {
-    console.error('Error fetching employee:', error);
+  if (!employee || !employee.isActive) {
     return NextResponse.json(
-      { error: 'Failed to fetch employee' },
-      { status: 500 }
-    );
+      { error: "Employee not found or inactive" },
+      { status: 404 }
+    )
   }
+
+  /**
+   * 2️⃣ Ambil leave balance tahun berjalan
+   */
+  const leaveBalance = await prisma.leaveBalance.findUnique({
+    where: {
+      employeeId_year: {
+        employeeId: employee.id,
+        year,
+      },
+    },
+    select: {
+      total: true,
+      used: true,
+    },
+  })
+
+  const total = leaveBalance?.total ?? 0
+  const used = leaveBalance?.used ?? 0
+  const remaining = Math.max(total - used, 0)
+
+  /**
+   * 3️⃣ Response final
+   */
+  return NextResponse.json({
+    employee: {
+      id: employee.id,
+      employeeCode: employee.employeeCode,
+      name: employee.name,
+      department: employee.department,
+      position: employee.position,
+    },
+    leave: {
+      year,
+      total,
+      used,
+      remaining,
+    },
+  })
 }

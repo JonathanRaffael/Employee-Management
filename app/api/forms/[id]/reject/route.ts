@@ -3,129 +3,118 @@ import { getServerSession } from "next-auth"
 import { authOptions } from "@/lib/auth"
 import { prisma } from "@/lib/prisma"
 
-interface SessionUser {
-  id: string
-  name?: string | null
-  email?: string | null
-  image?: string | null
-  role: string
-}
+const FINAL_REJECT_ROLES = ["hrd", "admin"]
+const ALLOWED_ROLES = ["leader", "hrd", "supervisor", "admin"]
 
-interface CustomSession {
-  user: SessionUser
-}
+export async function POST(
+  request: Request,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const session = await getServerSession(authOptions)
 
-export async function POST(request: Request, context: { params: { id: string } }) {
-  const session = (await getServerSession(authOptions)) as CustomSession | null
-
-  if (!session) {
+  if (!session?.user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 
-  // Use the id directly from context.params
-  const formId = context.params.id
-  const userRole = session.user.role
+  const { id: formId } = await params
+  const userRole = session.user.role.toLowerCase()
+  const approverId = session.user.id
 
-  // Update to include PMC-related roles for form rejection
-  const allowedRoles = ["leader", "hrd", "pmc", "pmc_admin", "pmc_manager", "admin"]
-  if (!allowedRoles.includes(userRole)) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
-  }
-
-  // Determine the actual role for approval
-  let approvalRole = userRole
-  if (userRole === "pmc_admin" || userRole === "pmc_manager") {
-    approvalRole = "pmc"
+  if (!ALLOWED_ROLES.includes(userRole)) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 })
   }
 
   try {
-    const data = await request.json()
-    const { reason } = data
+    const body = await request.json()
+    const reason = body?.rejectionReason?.trim()
 
     if (!reason) {
-      return NextResponse.json({ error: "Rejection reason is required" }, { status: 400 })
+      return NextResponse.json(
+        { error: "Rejection reason is required" },
+        { status: 400 }
+      )
     }
 
-    // Get the current form to check its status
-    const form = await prisma.form.findUnique({
-      where: { id: formId },
-      include: {
-        employee: true,
-        approvals: true,
-      },
-    })
-
-    if (!form) {
-      return NextResponse.json({ error: "Form not found" }, { status: 404 })
-    }
-
-    // PMC can only reject overtime forms
-    if (
-      (approvalRole === "pmc" || userRole === "pmc_admin" || userRole === "pmc_manager") &&
-      form.type !== "overtime"
-    ) {
-      return NextResponse.json({ error: "PMC can only reject overtime forms" }, { status: 403 })
-    }
-
-    // Find the approval for the current user's role
-    const userRoleApproval = form.approvals.find((approval) => approval.role === approvalRole)
-
-    if (userRoleApproval) {
-      // Update existing approval
-      await prisma.approval.update({
-        where: { id: userRoleApproval.id },
-        data: {
-          status: "rejected",
-          approverId: session.user.id,
-          comments: reason,
-        },
+    const result = await prisma.$transaction(async (tx) => {
+      const form = await tx.form.findUnique({
+        where: { id: formId },
+        include: { approvals: true },
       })
-    } else {
-      // Create new approval if it doesn't exist
-      await prisma.approval.create({
-        data: {
-          formId,
-          role: approvalRole,
-          status: "rejected",
-          approverId: session.user.id,
-          comments: reason,
-        },
-      })
-    }
 
-    // Update the form status to rejected
-    await prisma.form.update({
-      where: { id: formId },
-      data: { status: "rejected" },
-    })
+      if (!form) throw new Error("Form not found")
+      if (form.status === "approved") throw new Error("Approved form cannot be rejected")
+      if (form.status === "rejected") throw new Error("Form already rejected")
 
-    // If the form was previously approved and is now rejected, and it's a leave form,
-    // we need to adjust the leave balance back
-    if (form.status === "approved" && form.type === "leave") {
-      const formData = form.data as any
-      const jumlahHari = formData.jumlahHari || (formData.totalDays && Number.parseInt(formData.totalDays)) || 1
+      if (userRole === "supervisor" && form.type !== "overtime") {
+        throw new Error("Supervisor can only reject overtime forms")
+      }
 
-      // Only update leave balance for annual leave
-      if (formData.leaveType === "Annual Leave") {
-        // Decrement the cutiterpakai by the number of days that were approved
-        await prisma.user.update({
-          where: { id: form.employeeId },
+      const existingApproval = form.approvals.find(
+        (a) => a.role.toLowerCase() === userRole
+      )
+
+      if (existingApproval?.status === "approved") {
+        throw new Error("Final approval cannot be rejected")
+      }
+
+      if (existingApproval) {
+        await tx.approval.update({
+          where: { id: existingApproval.id },
           data: {
-            cutiterpakai: {
-              decrement: jumlahHari,
-            },
+            status: "rejected",
+            approverId,
+            comments: reason,
+          },
+        })
+      } else {
+        await tx.approval.create({
+          data: {
+            formId,
+            role: userRole,
+            status: "rejected",
+            approverId,
+            comments: reason,
           },
         })
       }
-    }
+
+      if (FINAL_REJECT_ROLES.includes(userRole)) {
+        await tx.form.update({
+          where: { id: formId },
+          data: { status: "rejected" },
+        })
+      }
+
+      const updatedForm = await tx.form.findUnique({
+        where: { id: formId },
+        include: {
+          approvals: {
+            include: {
+              approver: {
+                select: { id: true, name: true, role: true },
+              },
+            },
+          },
+        },
+      })
+
+      return {
+        message: FINAL_REJECT_ROLES.includes(userRole)
+          ? "Form rejected"
+          : "Rejection recorded (awaiting final decision)",
+        form: updatedForm,
+      }
+    })
 
     return NextResponse.json({
       success: true,
-      message: `Form rejected by ${approvalRole.toUpperCase()}`,
+      status: "REJECTED",
+      ...result,
     })
-  } catch (error) {
-    console.error("Error rejecting form:", error)
-    const errorMessage = error instanceof Error ? error.message : "Failed to reject form"
-    return NextResponse.json({ error: errorMessage }, { status: 500 })
+  } catch (error: any) {
+    return NextResponse.json(
+      { error: error.message ?? "Reject failed" },
+      { status: 400 }
+    )
   }
 }

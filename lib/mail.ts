@@ -1,76 +1,115 @@
-// Server-side email sending function with proper URL handling
-export async function sendMail({ to, subject, html }: { to: string | string[]; subject: string; html: string }) {
-  try {
-    // Check if we're running on the server
-    if (typeof window === "undefined") {
-      // Server-side: use absolute URL
-      const baseUrl = process.env.NEXTAUTH_URL || process.env.VERCEL_URL || "http://localhost:3000"
-      const response = await fetch(`${baseUrl}/api/send-email`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ to, subject, html }),
-      })
+// lib/mail.ts
+import nodemailer from "nodemailer"
+import type Mail from "nodemailer/lib/mailer"
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ error: "Unknown error" }))
-        throw new Error(errorData.error || `HTTP ${response.status}: ${response.statusText}`)
-      }
+interface SendMailOptions {
+  to: string | string[]
+  subject: string
+  html: string
+  // Optional attachments, mengikuti tipe Nodemailer
+  attachments?: Mail.Attachment[]
+}
 
-      const data = await response.json()
-      console.log(`Email sent successfully to ${to}`)
-      return { success: true, messageId: data.messageId }
-    } else {
-      // Client-side: use relative URL
-      const response = await fetch("/api/send-email", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ to, subject, html }),
-      })
+// Singleton transporter
+let transporter: nodemailer.Transporter | null = null
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ error: "Unknown error" }))
-        throw new Error(errorData.error || "Failed to send email")
-      }
-
-      const data = await response.json()
-      return { success: true, messageId: data.messageId }
+function getTransporter() {
+  if (!transporter) {
+    if (!process.env.SMTP_USER || !process.env.SMTP_PASSWORD) {
+      throw new Error("SMTP credentials not configured")
     }
+
+    transporter = nodemailer.createTransport({
+      host: process.env.SMTP_HOST || "smtp.gmail.com",
+      port: Number(process.env.SMTP_PORT) || 587,
+      secure: process.env.SMTP_SECURE === "true", // false for port 587
+      auth: {
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASSWORD,
+      },
+      pool: true,
+      maxConnections: 5,
+      maxMessages: 100,
+    })
+  }
+  return transporter
+}
+
+// Simple in-memory rate limiter
+const emailRateLimit = new Map<string, number[]>()
+const MAX_EMAILS_PER_MINUTE = 10
+const ONE_MINUTE = 60 * 1000
+
+function isRateLimited(identifier: string): boolean {
+  const now = Date.now()
+  const timestamps = emailRateLimit.get(identifier) || []
+  const recent = timestamps.filter((time) => now - time < ONE_MINUTE)
+
+  recent.push(now)
+  emailRateLimit.set(identifier, recent)
+
+  return recent.length > MAX_EMAILS_PER_MINUTE
+}
+
+export async function sendMail({ to, subject, html, attachments }: SendMailOptions) {
+  try {
+    // Server-side send
+    if (typeof window === "undefined") {
+      const identifier = Array.isArray(to) ? to[0] : to
+      if (isRateLimited(identifier)) {
+        return { success: false, error: "Rate limit exceeded" }
+      }
+
+      const fromName = "PT. Hang Tong Manufactory"
+      const fromEmail = process.env.SMTP_USER || "hrteam.hangtong@gmail.com"
+
+      const recipientList = typeof to === "string" ? to.split(",").map((e) => e.trim()) : to
+
+      const info = await getTransporter().sendMail({
+        from: `${fromName} <${fromEmail}>`,
+        to: recipientList,
+        subject,
+        html,
+        // attachments tetap boleh undefined
+        attachments,
+      })
+
+      console.log(`Email sent to ${recipientList.join(", ")} - ID: ${info.messageId}`)
+      return { success: true, messageId: info.messageId }
+    }
+
+    // Client-side: fallback ke API route
+    // ⚠️ Attachments tidak dikirim via client-side di sini karena masalah serialisasi
+    const res = await fetch("/api/send-email", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ to, subject, html }),
+    })
+
+    if (!res.ok) {
+      const errorData = await res.json().catch(() => ({}))
+      throw new Error(errorData.error || "Failed to send email")
+    }
+
+    const data = await res.json()
+    return { success: true, messageId: data.messageId }
   } catch (error) {
     console.error("Error sending email:", error)
-    return { success: false, error }
+    return { success: false, error: error instanceof Error ? error.message : String(error) }
   }
 }
 
-// Alternative direct email sending function (bypasses API route)
-export async function sendMailDirect({ to, subject, html }: { to: string; subject: string; html: string }) {
+export async function sendMailDirect({ to, subject, html, attachments }: SendMailOptions) {
   try {
-    // This would be used if you want to send emails directly without going through the API route
-    // Example with Resend:
-    /*
-    import { Resend } from 'resend'
-    
-    const resend = new Resend(process.env.RESEND_API_KEY)
-    
-    const result = await resend.emails.send({
-      from: process.env.FROM_EMAIL || 'noreply@hangtong.com',
+    console.log("Mock direct email:", {
       to,
       subject,
-      html,
+      preview: html.slice(0, 100) + "...",
+      hasAttachments: !!attachments && attachments.length > 0,
     })
-    
-    console.log(`Direct email sent successfully to ${to}`)
-    return { success: true, messageId: result.data?.id }
-    */
-
-    // For now, just log the email (replace with actual email service)
-    console.log("Email would be sent:", { to, subject, html: html.substring(0, 100) + "..." })
     return { success: true, messageId: `mock-${Date.now()}` }
   } catch (error) {
     console.error("Error sending direct email:", error)
-    return { success: false, error }
+    return { success: false, error: error instanceof Error ? error.message : String(error) }
   }
 }

@@ -10,7 +10,7 @@ export default async function OvertimeFormPage() {
     redirect("/")
   }
 
-  if (session.user.role !== "leader") {
+  if (session.user.role !== "LEADER") {
     redirect("/dashboard")
   }
 

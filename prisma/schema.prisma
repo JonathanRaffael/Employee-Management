@@ -7,51 +7,225 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+//////////////////////////////////////////////////////
+// USER (LOGIN ACCOUNT)
+//////////////////////////////////////////////////////
+
 model User {
-  id           String     @id @default(cuid())
-  name         String
-  email        String     @unique
-  password     String
-  role         String     // "leader", "hrd", "admin", "pmc"
-  employeeId   String?
-  department   String?
-  position     String?
-  jatahcuti    Int        @default(12)
-  cutiterpakai Int        @default(0)
-  sisaCuti     Int        @default(12)  // Added this field
-  forms        Form[]     @relation("EmployeeForms")
-  approvals    Approval[] @relation("ApproverApprovals")
-  createdAt    DateTime   @default(now())
-  updatedAt    DateTime   @updatedAt
+  id         String   @id @default(cuid())
+  name       String?
+  email      String   @unique
+  password   String?
+  role       String?
+  department String?
+  position   String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  approvals     Approval[]     @relation("ApproverApprovals")
+  createdForms Form[]         @relation("FormCreator")
+  notifications Notification[]
+  employee      Employee?
+
+  @@index([role])
+  @@index([department])
 }
 
-model Form {
-  id                  String     @id @default(cuid())
-  formNumber          Int?       @unique // Sequential form number
-  type                String     // "leave", "overtime"
-  status              String     // "pending", "approved", "rejected", "process"
-  data                Json       // Form data
-  employeeId          String
-  employee            User       @relation("EmployeeForms", fields: [employeeId], references: [id])
-  employeeSignature   String?    // Base64 encoded signature
-  supportingDocuments String[]   // Array of file URLs
-  pmSignature         String?    // Production Manager signature (Base64 encoded)
-  pmApprovalDate      DateTime?  // When the Production Manager approved
-  approvals           Approval[]
-  createdAt           DateTime   @default(now())
-  updatedAt           DateTime   @updatedAt
+//////////////////////////////////////////////////////
+// EMPLOYEE (NON LOGIN ENTITY)
+//////////////////////////////////////////////////////
+
+model Employee {
+  id           String   @id @default(cuid())
+  userId       String?  @unique
+  employeeCode String
+  name         String
+  department   String
+  position     String
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user          User?          @relation(fields: [userId], references: [id])
+  leaveBalances LeaveBalance[]
+  forms         Form[]
+
+  @@index([employeeCode])
+  @@index([department])
 }
+
+//////////////////////////////////////////////////////
+// LEAVE BALANCE
+//////////////////////////////////////////////////////
+
+model LeaveBalance {
+  id         String @id @default(cuid())
+  employeeId String
+  year       Int
+  total      Int
+  used       Int    @default(0)
+
+  employee Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  @@unique([employeeId, year])
+}
+
+//////////////////////////////////////////////////////
+// FORM (NO APPROVAL LOGIC HERE)
+//////////////////////////////////////////////////////
+
+model Form {
+  id         String   @id @default(cuid())
+  type       String
+  status     String
+  data       Json?
+
+  // employee yang diajukan
+  employeeId String
+  employee   Employee @relation(fields: [employeeId], references: [id])
+
+  // user pembuat form (leader / employee login)
+  createdById String
+  createdBy   User   @relation("FormCreator", fields: [createdById], references: [id])
+
+  supportingDocuments String[]
+  formNumber          Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  approvals Approval[]
+
+  jobRequisition  JobRequisitionForm?
+  trainingRequest TrainingRequestForm?
+
+  @@unique([type, formNumber])
+  @@index([status])
+  @@index([type])
+  @@index([employeeId])
+  @@index([createdById])
+}
+
+//////////////////////////////////////////////////////
+// APPROVAL = SINGLE SOURCE OF TRUTH
+//////////////////////////////////////////////////////
 
 model Approval {
   id         String   @id @default(cuid())
   formId     String
-  form       Form     @relation(fields: [formId], references: [id], onDelete: Cascade)
-  role       String   // "leader", "hrd", "pmc"
-  status     String   // "pending", "approved", "rejected", "process"
+  role       String
+  status     String   // PENDING | APPROVED | REJECTED
   approverId String?
-  approver   User?    @relation("ApproverApprovals", fields: [approverId], references: [id])
-  signature  String?  // Base64 encoded signature
-  comments   String?  // Comments or rejection reason
+  signature  String?
+  comments   String?
+  approvedAt DateTime?
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
+
+  approver User? @relation("ApproverApprovals", fields: [approverId], references: [id])
+  form     Form  @relation(fields: [formId], references: [id], onDelete: Cascade)
+
+  @@unique([formId, role])
+  @@index([formId])
+  @@index([role])
+  @@index([status])
+}
+
+//////////////////////////////////////////////////////
+// NOTIFICATION
+//////////////////////////////////////////////////////
+
+model Notification {
+  id        String   @id @default(cuid())
+  title     String
+  message   String?
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+  userId    String
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+}
+
+//////////////////////////////////////////////////////
+// JOB REQUISITION
+//////////////////////////////////////////////////////
+
+model JobRequisitionForm {
+  formId            String               @id
+  requestPosition   String
+  departmentName    String
+  expectedStartDate DateTime?
+  skillsRequired    String?
+  explanation       String?
+  positionDuration  PositionDurationType
+  endDate           DateTime?
+  employmentType    EmploymentType
+  salaryRange       String?
+  budgetStatus      BudgetStatus
+  remarks           String?
+
+  form Form @relation(fields: [formId], references: [id], onDelete: Cascade)
+}
+
+//////////////////////////////////////////////////////
+// TRAINING REQUEST
+//////////////////////////////////////////////////////
+
+model TrainingRequestForm {
+  formId                 String @id
+  fullName               String
+  employeeCode           String?
+  departmentName         String?
+  position               String?
+  contactInfo            String?
+  trainingTitle          String
+  trainingProvider       String?
+  startDate              DateTime?
+  endDate                DateTime?
+  trainingLocation       String?
+  trainingMode           TrainingMode?
+  trainingDuration       String?
+  accommodationRequired  Boolean @default(false)
+  checkInDate            DateTime?
+  nights                 Int?
+  preferredAccommodation String?
+  trainingObjectives     String?
+  employeeCategory       EmployeeCategory?
+  hrStatus               String?
+  hrComments             String?
+
+  form Form @relation(fields: [formId], references: [id], onDelete: Cascade)
+}
+
+//////////////////////////////////////////////////////
+// ENUMS
+//////////////////////////////////////////////////////
+
+enum EmploymentType {
+  PART_TIME
+  FULL_TIME
+  CONTRACT
+}
+
+enum PositionDurationType {
+  PERMANENT
+  TEMPORARY
+}
+
+enum BudgetStatus {
+  SUFFICIENT
+  REQUIRES_ADDITIONAL
+}
+
+enum TrainingMode {
+  ONLINE
+  IN_PERSON
+  HYBRID
+}
+
+enum EmployeeCategory {
+  STAFF
+  NON_STAFF
 }

@@ -1,7 +1,8 @@
 "use client"
 
-import { useState, useEffect, useMemo } from "react"
-import Link from "next/link"
+import React from "react"
+import { useState, useEffect, useMemo, useCallback } from "react"
+import { useRouter } from "next/navigation"
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
@@ -27,6 +28,9 @@ import {
   Download,
   FileDown,
   Trash2,
+  Loader2,
+  Users,
+  GraduationCap,
 } from "lucide-react"
 import {
   DropdownMenu,
@@ -53,7 +57,150 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 
-function MonthYearPicker({
+// ✅ Enhanced interfaces with better typing
+interface Form {
+  id: string
+  type: string
+  status: string
+  createdAt: string
+  data: any
+  employee: {
+    name: string
+    employeeId: string
+    department: string
+    position: string
+  }
+  formNumber?: number
+}
+
+interface Employee {
+  name: string
+  employeeId: string
+  employeeCode?: string
+  department: string
+  position: string
+  id?: string
+}
+
+interface PaginationData {
+  total: number
+  page: number
+  limit: number
+  totalPages: number
+  hasNextPage: boolean
+  hasPrevPage: boolean
+}
+
+interface DashboardFilters {
+  activeTab: string
+  timeFilter: string
+  selectedMonth: { month: number; year: number } | null
+  departmentFilter: string
+  requestTypeFilter: "all" | "leave" | "overtime"
+  sortOption: string
+}
+
+interface CacheEntry<T> {
+  data: T
+  timestamp: number
+  key: string
+}
+
+interface ApiResponse {
+  data?: Form[]
+  pagination?: PaginationData
+}
+
+interface StatsApiResponse {
+  data?: Form[]
+}
+
+const normalizeStatus = (status?: string | null) => (status ?? "").toUpperCase()
+
+const formatFormId = (form: Form): string => {
+  if (form.formNumber) {
+    const numericId = Number(form.formNumber)
+    if (!isNaN(numericId)) {
+      return numericId.toString().padStart(4, "0")
+    }
+  }
+  return "0001"
+}
+
+const getEmployeeId = (form: Form, employee: Employee): string => {
+  if (form.type === "leave") {
+    return employee.employeeCode || (employee as any).employeeId || "-"
+  } else {
+    return employee.employeeCode || employee.employeeId || "-"
+  }
+}
+
+// ✅ Simple in-memory cache for API responses
+class DashboardCache {
+  private cache = new Map<string, CacheEntry<any>>()
+  private readonly ttl = 60000 // 1 minute TTL
+
+  set<T>(key: string, data: T): void {
+    this.cache.set(key, {
+      data,
+      timestamp: Date.now(),
+      key,
+    })
+  }
+
+  get<T>(key: string): T | null {
+    const entry = this.cache.get(key)
+    if (!entry) return null
+
+    if (Date.now() - entry.timestamp > this.ttl) {
+      this.cache.delete(key)
+      return null
+    }
+
+    return entry.data
+  }
+
+  clear(): void {
+    this.cache.clear()
+  }
+
+  generateKey(filters: Partial<DashboardFilters>, page?: number): string {
+    const keyParts = [
+      `tab:${filters.activeTab || "all"}`,
+      `time:${filters.timeFilter || "all"}`,
+      `month:${filters.selectedMonth ? `${filters.selectedMonth.month}-${filters.selectedMonth.year}` : "none"}`,
+      `dept:${filters.departmentFilter || "all"}`,
+      `type:${filters.requestTypeFilter || "all"}`,
+      `sort:${filters.sortOption || "newest"}`,
+      page ? `page:${page}` : "",
+    ].filter(Boolean)
+
+    return keyParts.join("|")
+  }
+}
+
+// ✅ Global cache instance
+const dashboardCache = new DashboardCache()
+
+// ✅ Debounce hook for filter changes
+function useDebounce<T>(value: T, delay: number): T {
+  const [debouncedValue, setDebouncedValue] = useState<T>(value)
+
+  useEffect(() => {
+    const handler = setTimeout(() => {
+      setDebouncedValue(value)
+    }, delay)
+
+    return () => {
+      clearTimeout(handler)
+    }
+  }, [value, delay])
+
+  return debouncedValue
+}
+
+// ✅ Memoized MonthYearPicker component
+const MonthYearPicker = React.memo(function MonthYearPicker({
   selectedMonth,
   setSelectedMonth,
   setPagination,
@@ -66,43 +213,47 @@ function MonthYearPicker({
   const [tempYear, setTempYear] = useState(new Date().getFullYear())
   const [viewingYear, setViewingYear] = useState(new Date().getFullYear())
 
-  const months = [
-    "January",
-    "February",
-    "March",
-    "April",
-    "May",
-    "June",
-    "July",
-    "August",
-    "September",
-    "October",
-    "November",
-    "December",
-  ]
+  const months = useMemo(
+    () => [
+      "January",
+      "February",
+      "March",
+      "April",
+      "May",
+      "June",
+      "July",
+      "August",
+      "September",
+      "October",
+      "November",
+      "December",
+    ],
+    [],
+  )
 
-  const years = Array.from({ length: 10 }, (_, i) => viewingYear - 5 + i)
+  const years = useMemo(() => Array.from({ length: 10 }, (_, i) => viewingYear - 5 + i), [viewingYear])
 
-  const handleSelectMonth = (month: number) => {
-    setSelectedMonth({ month, year: tempYear })
-    setIsOpen(false)
-    // Reset to page 1 when changing month
-    setPagination((prev) => ({ ...prev, page: 1 }))
-  }
+  const handleSelectMonth = useCallback(
+    (month: number) => {
+      setSelectedMonth({ month, year: tempYear })
+      setIsOpen(false)
+      setPagination((prev) => ({ ...prev, page: 1 }))
+    },
+    [tempYear, setSelectedMonth, setPagination],
+  )
 
-  const clearSelection = () => {
+  const clearSelection = useCallback(() => {
     setSelectedMonth(null)
     setIsOpen(false)
-    // Reset to page 1 when clearing selection
     setPagination((prev) => ({ ...prev, page: 1 }))
-  }
+  }, [setSelectedMonth, setPagination])
 
   return (
     <Popover open={isOpen} onOpenChange={setIsOpen}>
       <PopoverTrigger asChild>
         <Button
           variant="outline"
-          className="w-[200px] justify-start text-left font-normal border-slate-300 dark:border-slate-700"
+          className="w-[200px] justify-start text-left font-normal border-slate-300 dark:border-slate-700 bg-transparent"
         >
           <CalendarIcon className="mr-2 h-4 w-4" />
           {selectedMonth ? `${months[selectedMonth.month]} ${selectedMonth.year}` : "Select month"}
@@ -159,41 +310,26 @@ function MonthYearPicker({
       </PopoverContent>
     </Popover>
   )
-}
+})
 
-interface Form {
-  id: string
-  type: string
-  status: string
-  createdAt: string
-  data: any
-  employee: {
-    name: string
-    employeeId: string
-    department: string
-    position: string
-  }
-}
+// ✅ Memoized form card components
+const LeaveRequestCard = React.memo(function LeaveRequestCard({
+  form,
+  deleteForm,
+  handleViewForm,
+  viewingFormId,
+  onApprove,
+}: {
+  form: Form
+  deleteForm: (id: string) => void
+  handleViewForm: (id: string) => void
+  viewingFormId: string | null
+  onApprove: (id: string) => void
+}) {
+  const handleDelete = useCallback(() => {
+    deleteForm(form.id)
+  }, [form.id, deleteForm])
 
-// Add this interface near the top of the file, after the Form interface
-interface Employee {
-  name: string
-  employeeId: string
-  department: string
-  position: string
-  id?: string
-}
-
-interface PaginationData {
-  total: number
-  page: number
-  limit: number
-  totalPages: number
-  hasNextPage: boolean
-  hasPrevPage: boolean
-}
-
-function LeaveRequestCard({ form, deleteForm }: { form: Form; deleteForm: (formId: string) => void }) {
   return (
     <Card className="h-full border-l-4 border-l-slate-500 dark:border-l-slate-400 overflow-hidden">
       <CardHeader className="pb-2">
@@ -205,7 +341,7 @@ function LeaveRequestCard({ form, deleteForm }: { form: Form; deleteForm: (formI
             </CardTitle>
             <CardDescription>
               <div className="flex flex-wrap gap-1">
-                {form.data.employees && form.data.employees.length > 0 ? (
+                {form.data?.employees && form.data.employees.length > 0 ? (
                   form.data.employees.map((emp: Employee, index: number) => (
                     <span key={emp.employeeId || index}>
                       {index > 0 && <span className="mx-1">•</span>}
@@ -218,11 +354,7 @@ function LeaveRequestCard({ form, deleteForm }: { form: Form; deleteForm: (formI
                   </span>
                 )}
               </div>
-              <div className="mt-1">
-                {form.data.employees && form.data.employees[0]
-                  ? form.data.employees[0].department
-                  : form.employee.department}
-              </div>
+              <div className="mt-1">{form.data?.employees?.[0]?.department || form.employee.department}</div>
             </CardDescription>
           </div>
           <FormStatusBadge status={form.status} />
@@ -251,27 +383,33 @@ function LeaveRequestCard({ form, deleteForm }: { form: Form; deleteForm: (formI
         </div>
       </CardContent>
       <CardFooter className="pt-0 flex justify-between">
-        <Link href={`/dashboard/form/${form.id}`}>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="text-xs text-slate-600 dark:text-slate-400 font-medium flex items-center"
-          >
-            <Eye className="h-3.5 w-3.5 mr-1" />
-            View details
-            <ArrowRight className="h-3 w-3 ml-1" />
-          </Button>
-        </Link>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="text-xs text-slate-600 dark:text-slate-400 font-medium flex items-center"
+          onClick={() => handleViewForm(form.id)}
+          disabled={viewingFormId === form.id}
+        >
+          {viewingFormId === form.id ? (
+            <>
+              <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
+              Loading...
+            </>
+          ) : (
+            <>
+              <Eye className="h-3.5 w-3.5 mr-1" />
+              View details
+              <ArrowRight className="h-3 w-3 ml-1" />
+            </>
+          )}
+        </Button>
         <div className="flex gap-1">
-          {form.status === "pending" && (
+          {normalizeStatus(form.status) === "PENDING" && (
             <>
               <TooltipProvider>
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-8 w-8 text-slate-600 hover:text-slate-700 hover:bg-slate-100 dark:text-slate-400 dark:hover:text-slate-300 dark:hover:bg-slate-800"
+                    <Button variant="ghost" size="icon" onClick={() => onApprove(form.id)}
                     >
                       <ThumbsUp className="h-4 w-4" />
                     </Button>
@@ -281,13 +419,15 @@ function LeaveRequestCard({ form, deleteForm }: { form: Form; deleteForm: (formI
                   </TooltipContent>
                 </Tooltip>
               </TooltipProvider>
+
               <TooltipProvider>
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button
                       variant="ghost"
                       size="icon"
-                      className="h-8 w-8 text-red-600 hover:text-red-700 hover:bg-red-50 dark:text-red-400 dark:hover:text-red-300 dark:hover:bg-red-900/20"
+                      className="h-8 w-8 text-red-600 hover:text-red-700 hover:bg-red-50
+                         dark:text-red-400 dark:hover:text-red-300 dark:hover:bg-red-900/20"
                     >
                       <ThumbsDown className="h-4 w-4" />
                     </Button>
@@ -299,30 +439,46 @@ function LeaveRequestCard({ form, deleteForm }: { form: Form; deleteForm: (formI
               </TooltipProvider>
             </>
           )}
-          <TooltipProvider>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  onClick={() => deleteForm(form.id)}
-                  className="h-8 w-8 text-red-600 hover:text-red-700 hover:bg-red-50 dark:text-red-400 dark:hover:text-red-300 dark:hover:bg-red-900/20"
-                >
-                  <Trash2 className="h-4 w-4" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>
-                <p>Delete Form</p>
-              </TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
         </div>
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={handleDelete}
+                className="h-8 w-8 text-red-600 hover:text-red-700 hover:bg-red-50 dark:text-red-400 dark:hover:text-red-300 dark:hover:bg-red-900/20"
+              >
+                <Trash2 className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              <p>Delete Form</p>
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
       </CardFooter>
     </Card>
   )
-}
+})
 
-function OvertimeRequestCard({ form, deleteForm }: { form: Form; deleteForm: (formId: string) => void }) {
+const OvertimeRequestCard = React.memo(function OvertimeRequestCard({
+  form,
+  deleteForm,
+  handleViewForm,
+  viewingFormId,
+  onApprove,
+}: {
+  form: Form
+  deleteForm: (formId: string) => void
+  handleViewForm: (formId: string) => void
+  viewingFormId: string | null
+  onApprove: (id: string) => void
+}) {
+  const handleDelete = useCallback(() => {
+    deleteForm(form.id)
+  }, [form.id, deleteForm])
+
   return (
     <Card className="h-full border-l-4 border-l-slate-500 dark:border-l-slate-400 overflow-hidden">
       <CardHeader className="pb-2">
@@ -334,24 +490,20 @@ function OvertimeRequestCard({ form, deleteForm }: { form: Form; deleteForm: (fo
             </CardTitle>
             <CardDescription>
               <div className="flex flex-wrap gap-1">
-                {form.data.employees && form.data.employees.length > 0 ? (
+                {form.data?.employees && form.data.employees.length > 0 ? (
                   form.data.employees.map((emp: Employee, index: number) => (
-                    <span key={emp.employeeId || index}>
+                    <span key={getEmployeeId(form, emp) || index}>
                       {index > 0 && <span className="mx-1">•</span>}
-                      {emp.name} <span className="text-slate-400">({emp.employeeId})</span>
+                      {emp.name} <span className="text-slate-400">({getEmployeeId(form, emp)})</span>
                     </span>
                   ))
                 ) : (
                   <span>
-                    {form.employee.name} <span className="text-slate-400">({form.employee.employeeId})</span>
+                    {form.employee.name} <span className="text-slate-400">({getEmployeeId(form, form.employee)})</span>
                   </span>
                 )}
               </div>
-              <div className="mt-1">
-                {form.data.employees && form.data.employees[0]
-                  ? form.data.employees[0].department
-                  : form.employee.department}
-              </div>
+              <div className="mt-1">{form.data?.employees?.[0]?.department || form.employee.department}</div>
             </CardDescription>
           </div>
           <FormStatusBadge status={form.status} />
@@ -379,27 +531,33 @@ function OvertimeRequestCard({ form, deleteForm }: { form: Form; deleteForm: (fo
         </div>
       </CardContent>
       <CardFooter className="pt-0 flex justify-between">
-        <Link href={`/dashboard/form/${form.id}`}>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="text-xs text-slate-600 dark:text-slate-400 font-medium flex items-center"
-          >
-            <Eye className="h-3.5 w-3.5 mr-1" />
-            View details
-            <ArrowRight className="h-3 w-3 ml-1" />
-          </Button>
-        </Link>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="text-xs text-slate-600 dark:text-slate-400 font-medium flex items-center"
+          onClick={() => handleViewForm(form.id)}
+          disabled={viewingFormId === form.id}
+        >
+          {viewingFormId === form.id ? (
+            <>
+              <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
+              Loading...
+            </>
+          ) : (
+            <>
+              <Eye className="h-3.5 w-3.5 mr-1" />
+              View details
+              <ArrowRight className="h-3 w-3 ml-1" />
+            </>
+          )}
+        </Button>
         <div className="flex gap-1">
-          {form.status === "pending" && (
+          {normalizeStatus(form.status) === "PENDING" && (
             <>
               <TooltipProvider>
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-8 w-8 text-slate-600 hover:text-slate-700 hover:bg-slate-100 dark:text-slate-400 dark:hover:text-slate-300 dark:hover:bg-slate-800"
+                    <Button variant="ghost" size="icon" onClick={() => onApprove(form.id)}
                     >
                       <ThumbsUp className="h-4 w-4" />
                     </Button>
@@ -409,6 +567,7 @@ function OvertimeRequestCard({ form, deleteForm }: { form: Form; deleteForm: (fo
                   </TooltipContent>
                 </Tooltip>
               </TooltipProvider>
+
               <TooltipProvider>
                 <Tooltip>
                   <TooltipTrigger asChild>
@@ -427,13 +586,15 @@ function OvertimeRequestCard({ form, deleteForm }: { form: Form; deleteForm: (fo
               </TooltipProvider>
             </>
           )}
+
+          {/* ⬇️ INI JSX BIASA, DI LUAR CONDITIONAL */}
           <TooltipProvider>
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
                   variant="ghost"
                   size="icon"
-                  onClick={() => deleteForm(form.id)}
+                  onClick={handleDelete}
                   className="h-8 w-8 text-red-600 hover:text-red-700 hover:bg-red-50 dark:text-red-400 dark:hover:text-red-300 dark:hover:bg-red-900/20"
                 >
                   <Trash2 className="h-4 w-4" />
@@ -448,16 +609,25 @@ function OvertimeRequestCard({ form, deleteForm }: { form: Form; deleteForm: (fo
       </CardFooter>
     </Card>
   )
-}
+})
 
-export default function HRDDashboard({ user }: { user: any }) {
+export default function OptimizedHRDDashboard({ user }: { user: any }) {
+  // ✅ SINGLE SOURCE OF TRUTH
   const [forms, setForms] = useState<Form[]>([])
-  const [filteredForms, setFilteredForms] = useState<Form[]>([])
   const [isLoading, setIsLoading] = useState(true)
-  const [activeTab, setActiveTab] = useState("all")
-  const [sortOption, setSortOption] = useState("newest")
+  const [isInitialLoad, setIsInitialLoad] = useState(true)
 
-  // Pagination state
+  // ✅ FILTER STATE
+  const [filters, setFilters] = useState<DashboardFilters>({
+    activeTab: "all",
+    timeFilter: "all",
+    selectedMonth: null,
+    departmentFilter: "all",
+    requestTypeFilter: "all",
+    sortOption: "newest",
+  })
+
+  // ✅ PAGINATION STATE
   const [pagination, setPagination] = useState<PaginationData>({
     total: 0,
     page: 1,
@@ -467,348 +637,32 @@ export default function HRDDashboard({ user }: { user: any }) {
     hasPrevPage: false,
   })
 
+  // ✅ DERIVED DATA (NO useState, NO useEffect)
+  const filteredForms = useMemo(() => {
+    if (!Array.isArray(forms)) return []
+
+    return forms.filter((form) => {
+      const status = normalizeStatus(form.status)
+
+      if (filters.activeTab === "pending") return status === "PENDING"
+      if (filters.activeTab === "approved") return status === "APPROVED"
+      if (filters.activeTab === "rejected") return status === "REJECTED"
+
+      return true // "all"
+    })
+  }, [forms, filters.activeTab])
+
+  const debouncedFilters = useDebounce(filters, 300)
+
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
   const [formToDelete, setFormToDelete] = useState<string | null>(null)
   const [isDeleting, setIsDeleting] = useState(false)
 
-  const [departmentFilter, setDepartmentFilter] = useState("all")
-  const departments = useMemo(() => {
-    const depts = new Set<string>()
-    // Check if forms is an array before using forEach
-    if (Array.isArray(forms)) {
-      forms.forEach((form) => {
-        if (form.employee?.department) {
-          depts.add(form.employee.department)
-        }
-      })
-    }
-    return Array.from(depts)
-  }, [forms])
+  const [viewingFormId, setViewingFormId] = useState<string | null>(null)
+  const router = useRouter()
 
-  const [timeFilter, setTimeFilter] = useState("all")
-  const [selectedMonth, setSelectedMonth] = useState<{ month: number; year: number } | null>(null)
-  const [requestTypeFilter, setRequestTypeFilter] = useState<"all" | "leave" | "overtime">("all")
-
-  // Function to filter forms by time range (month or predefined period)
-  const filterFormsByTimeRange = (forms: Form[]) => {
-    if (!Array.isArray(forms)) return []
-
-    // If month is selected, filter by that month
-    if (selectedMonth) {
-      return forms.filter((form) => {
-        const formDate = new Date(form.createdAt)
-        return formDate.getMonth() === selectedMonth.month && formDate.getFullYear() === selectedMonth.year
-      })
-    }
-
-    // Otherwise use the time filter
-    if (timeFilter === "all") return forms
-
-    const now = new Date()
-    let start: Date
-    let end: Date = endOfDay(now)
-
-    switch (timeFilter) {
-      case "week":
-        start = startOfWeek(now, { weekStartsOn: 1 })
-        end = endOfWeek(now, { weekStartsOn: 1 })
-        break
-      case "month":
-        start = startOfMonth(now)
-        end = endOfMonth(now)
-        break
-      case "year":
-        start = startOfYear(now)
-        end = endOfYear(now)
-        break
-      default:
-        return forms
-    }
-
-    return forms.filter((form) => {
-      const formDate = new Date(form.createdAt)
-      return formDate >= start && formDate <= end
-    })
-  }
-
-  // Export functions
-  const downloadAsExcel = () => {
-    // Build the query parameters
-    const params = new URLSearchParams()
-    params.append("format", "excel")
-    params.append("getAllForms", "true") // Add this parameter to get all forms
-
-    if (selectedMonth) {
-      params.append("selectedMonth", JSON.stringify(selectedMonth))
-    } else if (timeFilter !== "all") {
-      params.append("timeFilter", timeFilter)
-    }
-
-    if (requestTypeFilter !== "all") {
-      params.append("type", requestTypeFilter)
-    }
-
-    if (departmentFilter !== "all") {
-      params.append("department", departmentFilter)
-    }
-
-    // Trigger file download
-    window.location.href = `/api/forms?${params.toString()}`
-  }
-
-  // Modify the downloadAsPDF function
-  const downloadAsPDF = () => {
-    // Build the query parameters
-    const params = new URLSearchParams()
-    params.append("format", "pdf")
-    params.append("getAllForms", "true") // Add this parameter to get all forms
-
-    if (selectedMonth) {
-      params.append("selectedMonth", JSON.stringify(selectedMonth))
-    } else if (timeFilter !== "all") {
-      params.append("timeFilter", timeFilter)
-    }
-
-    if (requestTypeFilter !== "all") {
-      params.append("type", requestTypeFilter)
-    }
-
-    if (departmentFilter !== "all") {
-      params.append("department", departmentFilter)
-    }
-
-    // Trigger file download
-    window.location.href = `/api/forms?${params.toString()}`
-  }
-
-  // Modify the downloadLeaveFormsAsExcel function
-  const downloadLeaveFormsAsExcel = () => {
-    // Build the query parameters
-    const params = new URLSearchParams()
-    params.append("format", "excel")
-    params.append("type", "leave")
-    params.append("getAllForms", "true") // Add this parameter to get all forms
-
-    if (selectedMonth) {
-      params.append("selectedMonth", JSON.stringify(selectedMonth))
-    } else if (timeFilter !== "all") {
-      params.append("timeFilter", timeFilter)
-    }
-
-    if (departmentFilter !== "all") {
-      params.append("department", departmentFilter)
-    }
-
-    // Trigger file download
-    window.location.href = `/api/forms?${params.toString()}`
-  }
-
-  // Modify the downloadOvertimeFormsAsExcel function
-  const downloadOvertimeFormsAsExcel = () => {
-    // Build the query parameters
-    const params = new URLSearchParams()
-    params.append("format", "excel")
-    params.append("type", "overtime")
-    params.append("getAllForms", "true") // Add this parameter to get all forms
-
-    if (selectedMonth) {
-      params.append("selectedMonth", JSON.stringify(selectedMonth))
-    } else if (timeFilter !== "all") {
-      params.append("timeFilter", timeFilter)
-    }
-
-    if (departmentFilter !== "all") {
-      params.append("department", departmentFilter)
-    }
-
-    // Trigger file download
-    window.location.href = `/api/forms?${params.toString()}`
-  }
-
-  // Modify the downloadLeaveFormsAsPDF function
-  const downloadLeaveFormsAsPDF = () => {
-    // Build the query parameters
-    const params = new URLSearchParams()
-    params.append("format", "pdf")
-    params.append("type", "leave")
-    params.append("getAllForms", "true") // Add this parameter to get all forms
-
-    if (selectedMonth) {
-      params.append("selectedMonth", JSON.stringify(selectedMonth))
-    } else if (timeFilter !== "all") {
-      params.append("timeFilter", timeFilter)
-    }
-
-    if (departmentFilter !== "all") {
-      params.append("department", departmentFilter)
-    }
-
-    // Trigger file download
-    window.location.href = `/api/forms?${params.toString()}`
-  }
-
-  // Modify the downloadOvertimeFormsAsPDF function
-  const downloadOvertimeFormsAsPDF = () => {
-    // Build the query parameters
-    const params = new URLSearchParams()
-    params.append("format", "pdf")
-    params.append("type", "overtime")
-    params.append("getAllForms", "true") // Add this parameter to get all forms
-
-    if (selectedMonth) {
-      params.append("selectedMonth", JSON.stringify(selectedMonth))
-    } else if (timeFilter !== "all") {
-      params.append("timeFilter", timeFilter)
-    }
-
-    if (departmentFilter !== "all") {
-      params.append("department", departmentFilter)
-    }
-
-    // Trigger file download
-    window.location.href = `/api/forms?${params.toString()}`
-  }
-
-  // Enhanced delete form function with confirmation dialog
-  const handleDeleteClick = (formId: string) => {
-    setFormToDelete(formId)
-    setShowDeleteDialog(true)
-  }
-
-  const confirmDelete = async () => {
-    if (!formToDelete) return
-
-    setIsDeleting(true)
-
-    try {
-      const response = await fetch(`/api/forms/${formToDelete}`, {
-        method: "DELETE",
-      })
-
-      if (response.ok) {
-        // Remove from local state
-        setForms((prevForms) => prevForms.filter((form) => form.id !== formToDelete))
-        setFilteredForms((prevForms) => prevForms.filter((form) => form.id !== formToDelete))
-
-        // Update pagination total
-        setPagination((prev) => ({
-          ...prev,
-          total: prev.total - 1,
-        }))
-
-        // Close dialog and reset state
-        setShowDeleteDialog(false)
-        setFormToDelete(null)
-      } else {
-        throw new Error("Failed to delete form")
-      }
-    } catch (error) {
-      console.error("Error deleting form:", error)
-      alert("Failed to delete form. Please try again.")
-    } finally {
-      setIsDeleting(false)
-    }
-  }
-
-  const cancelDelete = () => {
-    setShowDeleteDialog(false)
-    setFormToDelete(null)
-  }
-
-  const fetchForms = async (page = 1, status = activeTab) => {
-    setIsLoading(true)
-    try {
-      // First, fetch all forms for statistics and filtering (without pagination)
-      const statsParams = new URLSearchParams()
-
-      if (status !== "all") {
-        statsParams.append("status", status)
-      }
-
-      if (selectedMonth) {
-        const startDate = new Date(selectedMonth.year, selectedMonth.month, 1)
-        const endDate = new Date(selectedMonth.year, selectedMonth.month + 1, 0)
-        statsParams.append("startDate", startDate.toISOString())
-        statsParams.append("endDate", endDate.toISOString())
-      } else if (timeFilter !== "all") {
-        const { start, end } = getTimeFilterDates(timeFilter)
-        statsParams.append("startDate", start.toISOString())
-        statsParams.append("endDate", end.toISOString())
-      }
-
-      if (requestTypeFilter !== "all") {
-        statsParams.append("type", requestTypeFilter)
-      }
-
-      if (departmentFilter !== "all") {
-        statsParams.append("department", departmentFilter)
-      }
-
-      // Add a parameter to get all forms without pagination
-      statsParams.append("getAllForms", "true")
-
-      const statsResponse = await fetch(`/api/forms/stats?${statsParams.toString()}`)
-      const statsResult = await statsResponse.json()
-
-      // Set the complete forms data for statistics calculations
-      const allForms = statsResult.data || statsResult
-      setForms(Array.isArray(allForms) ? allForms : [])
-
-      // Now fetch paginated data for display
-      const params = new URLSearchParams()
-      params.append("page", page.toString())
-      params.append("limit", pagination.limit.toString())
-
-      if (status !== "all") {
-        params.append("status", status)
-      }
-
-      if (selectedMonth) {
-        const startDate = new Date(selectedMonth.year, selectedMonth.month, 1)
-        const endDate = new Date(selectedMonth.year, selectedMonth.month + 1, 0)
-        params.append("startDate", startDate.toISOString())
-        params.append("endDate", endDate.toISOString())
-      } else if (timeFilter !== "all") {
-        const { start, end } = getTimeFilterDates(timeFilter)
-        params.append("startDate", start.toISOString())
-        params.append("endDate", end.toISOString())
-      }
-
-      if (requestTypeFilter !== "all") {
-        params.append("type", requestTypeFilter)
-      }
-
-      if (departmentFilter !== "all") {
-        params.append("department", departmentFilter)
-      }
-
-      const response = await fetch(`/api/forms?${params.toString()}`)
-      const result = await response.json()
-
-      // Check if the response has a data property (paginated response)
-      if (result.data) {
-        setFilteredForms(Array.isArray(result.data) ? result.data : [])
-
-        // Update pagination state if available
-        if (result.pagination) {
-          setPagination(result.pagination)
-        }
-      } else {
-        // Handle the case where the response is directly an array
-        setFilteredForms(Array.isArray(result) ? result : [])
-      }
-    } catch (error) {
-      console.error("Error fetching forms:", error)
-      // Initialize with empty arrays on error
-      setForms([])
-      setFilteredForms([])
-    } finally {
-      setIsLoading(false)
-    }
-  }
-
-  // Helper function to get date ranges for predefined time filters
-  const getTimeFilterDates = (filter: string) => {
+  // ✅ Helper function for time filter dates
+  const getTimeFilterDates = useCallback((filter: string) => {
     const now = new Date()
     let start: Date
     let end: Date = endOfDay(now)
@@ -832,91 +686,402 @@ export default function HRDDashboard({ user }: { user: any }) {
     }
 
     return { start, end }
-  }
+  }, [])
 
-  useEffect(() => {
-    // Reset to page 1 when filters change
-    setPagination((prev) => ({ ...prev, page: 1 }))
-    fetchForms(1, activeTab)
-  }, [activeTab, selectedMonth, timeFilter, requestTypeFilter, departmentFilter])
-
-  useEffect(() => {
-    // Filter forms based on active tab and time filter
-    if (!Array.isArray(forms)) {
-      setFilteredForms([])
-      return
+  // ✅ Memoized departments calculation
+  const departments = useMemo(() => {
+    const depts = new Set<string>()
+    if (Array.isArray(forms)) {
+      forms.forEach((form) => {
+        if (form.employee?.department) {
+          depts.add(form.employee.department)
+        }
+      })
     }
+    return Array.from(depts)
+  }, [forms])
 
-    let result = [...forms]
-
-    // Apply tab filter
-    if (activeTab !== "all") {
-      result = result.filter((form) => form.status === activeTab)
-    }
-
-    // Apply department filter
-    if (departmentFilter !== "all") {
-      result = result.filter((form) => form.employee?.department === departmentFilter)
-    }
-
-    // Apply time filter or date range filter
-    result = filterFormsByTimeRange(result)
-
-    // Apply sorting
-    result = [...result].sort((a, b) => {
-      if (sortOption === "newest") {
-        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-      } else if (sortOption === "oldest") {
-        return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-      }
-      return 0
-    })
-
-    // Apply request type filter
-    if (requestTypeFilter !== "all") {
-      result = result.filter((form) => form.type === requestTypeFilter)
-    }
-
-    setFilteredForms(result)
-  }, [activeTab, forms, sortOption, timeFilter, selectedMonth, departmentFilter, requestTypeFilter])
-
-  const handleTabChange = (value: string) => {
-    setActiveTab(value)
-  }
-
-  const handlePageChange = (newPage: number) => {
-    fetchForms(newPage, activeTab)
-  }
-
-  // Calculate statistics
+  // ✅ Added job requisition and training request statistics to match leader dashboard
   const stats = useMemo(() => {
-    // Ensure forms is an array before calculating stats
     const formsArray = Array.isArray(forms) ? forms : []
 
     const totalLeave = formsArray.filter((form) => form.type === "leave").length
     const totalOvertime = formsArray.filter((form) => form.type === "overtime").length
-    const pendingLeave = formsArray.filter((form) => form.type === "leave" && form.status === "pending").length
-    const pendingOvertime = formsArray.filter((form) => form.type === "overtime" && form.status === "pending").length
-    const approvedLeave = formsArray.filter((form) => form.type === "leave" && form.status === "approved").length
-    const approvedOvertime = formsArray.filter((form) => form.type === "overtime" && form.status === "approved").length
-    const rejectedLeave = formsArray.filter((form) => form.type === "leave" && form.status === "rejected").length
-    const rejectedOvertime = formsArray.filter((form) => form.type === "overtime" && form.status === "rejected").length
+    const totalJobRequisition = formsArray.filter((form) => form.type === "job-requisition").length
+    const totalTrainingRequest = formsArray.filter((form) => form.type === "training-request").length
+    const pendingLeave = formsArray.filter(
+      (form) => form.type === "leave" && normalizeStatus(form.status) === "PENDING",
+    ).length
+    const pendingOvertime = formsArray.filter(
+      (form) => form.type === "overtime" && normalizeStatus(form.status) === "PENDING",
+    ).length
+    const pendingJobRequisition = formsArray.filter(
+      (form) => form.type === "job-requisition" && normalizeStatus(form.status) === "PENDING",
+    ).length
+    const pendingTrainingRequest = formsArray.filter(
+      (form) => form.type === "training-request" && normalizeStatus(form.status) === "PENDING",
+    ).length
+    const approvedLeave = formsArray.filter(
+      (form) => form.type === "leave" && normalizeStatus(form.status) === "APPROVED",
+    ).length
+    const approvedOvertime = formsArray.filter(
+      (form) => form.type === "overtime" && normalizeStatus(form.status) === "APPROVED",
+    ).length
+    const approvedJobRequisition = formsArray.filter(
+      (form) => form.type === "job-requisition" && normalizeStatus(form.status) === "APPROVED",
+    ).length
+    const approvedTrainingRequest = formsArray.filter(
+      (form) => form.type === "training-request" && normalizeStatus(form.status) === "APPROVED",
+    ).length
+    const rejectedLeave = formsArray.filter(
+      (form) => form.type === "leave" && normalizeStatus(form.status) === "REJECTED",
+    ).length
+    const rejectedOvertime = formsArray.filter(
+      (form) => form.type === "overtime" && normalizeStatus(form.status) === "REJECTED",
+    ).length
+    const rejectedJobRequisition = formsArray.filter(
+      (form) => form.type === "job-requisition" && normalizeStatus(form.status) === "REJECTED",
+    ).length
+    const rejectedTrainingRequest = formsArray.filter(
+      (form) => form.type === "training-request" && normalizeStatus(form.status) === "REJECTED",
+    ).length
 
     return {
       totalLeave,
       totalOvertime,
+      totalJobRequisition,
+      totalTrainingRequest,
       pendingLeave,
       pendingOvertime,
+      pendingJobRequisition,
+      pendingTrainingRequest,
       approvedLeave,
       approvedOvertime,
+      approvedJobRequisition,
+      approvedTrainingRequest,
       rejectedLeave,
       rejectedOvertime,
+      rejectedJobRequisition,
+      rejectedTrainingRequest,
       pendingLeavePercent: totalLeave ? Math.round((pendingLeave / totalLeave) * 100) : 0,
       pendingOvertimePercent: totalOvertime ? Math.round((pendingOvertime / totalOvertime) * 100) : 0,
-      totalRequests: pagination.total || formsArray.length || 100, // Default to 100 if no data available
+      totalRequests: totalLeave + totalOvertime + totalJobRequisition + totalTrainingRequest,
     }
-  }, [forms, pagination.total])
+  }, [forms])
 
+  // ✅ FIXED: Improved fetchForms function with better error handling
+  const fetchForms = useCallback(
+    async (page = 1, currentFilters = debouncedFilters) => {
+      const cacheKey = `forms:${dashboardCache.generateKey(currentFilters, page)}`
+      const cachedData = dashboardCache.get<{ forms: Form[]; pagination: PaginationData }>(cacheKey)
+
+      if (cachedData) {
+        console.log("✅ Using cached data for:", cacheKey)
+        setForms(Array.isArray(cachedData.forms) ? cachedData.forms : [])
+        if (cachedData.pagination) {
+          setPagination(cachedData.pagination)
+        }
+        setIsLoading(false)
+        return
+      }
+
+      setIsLoading(true)
+      try {
+        // ✅ Build API URL with proper parameters
+        const params = new URLSearchParams()
+        params.append("page", page.toString())
+        params.append("limit", pagination.limit.toString())
+
+        if (currentFilters.selectedMonth) {
+          const startDate = new Date(currentFilters.selectedMonth.year, currentFilters.selectedMonth.month, 1)
+          const endDate = new Date(currentFilters.selectedMonth.year, currentFilters.selectedMonth.month + 1, 0)
+          params.append("startDate", startDate.toISOString())
+          params.append("endDate", endDate.toISOString())
+        } else if (currentFilters.timeFilter !== "all") {
+          const { start, end } = getTimeFilterDates(currentFilters.timeFilter)
+          params.append("startDate", start.toISOString())
+          params.append("endDate", end.toISOString())
+        }
+
+        if (currentFilters.requestTypeFilter !== "all") {
+          params.append("type", currentFilters.requestTypeFilter)
+        }
+
+        if (currentFilters.departmentFilter !== "all") {
+          params.append("department", currentFilters.departmentFilter)
+        }
+
+        console.log("🔄 Fetching forms with params:", params.toString())
+
+        const response = await fetch(`/api/forms?${params.toString()}`)
+
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`)
+        }
+
+        const result = await response.json()
+        console.log("📥 API Response:", result)
+
+        // ✅ FIXED: Better response handling
+        const formsData = result?.data
+          ? Array.isArray(result.data)
+            ? result.data
+            : []
+          : Array.isArray(result)
+            ? result
+            : []
+
+        const paginationData = result?.pagination || {
+          total: formsData.length,
+          page: page,
+          limit: pagination.limit,
+          totalPages: Math.ceil(formsData.length / pagination.limit),
+          hasNextPage: false,
+          hasPrevPage: false,
+        }
+
+        const responseData = {
+          forms: formsData,
+          pagination: paginationData,
+        }
+
+        // ✅ Cache the response
+        dashboardCache.set(cacheKey, responseData)
+
+        setForms(formsData)
+        setPagination(paginationData)
+
+        console.log("✅ Fetched and cached data for:", cacheKey)
+        console.log("📊 Pagination data:", paginationData)
+      } catch (error) {
+        console.error("❌ Error fetching forms:", error)
+        setForms([])
+        // ✅ Reset pagination on error
+        setPagination({
+          total: 0,
+          page: 1,
+          limit: 10,
+          totalPages: 1,
+          hasNextPage: false,
+          hasPrevPage: false,
+        })
+      } finally {
+        setIsLoading(false)
+        setIsInitialLoad(false)
+      }
+    },
+    [debouncedFilters, pagination.limit, getTimeFilterDates],
+  )
+
+  const handleApprove = useCallback(
+  async (formId: string) => {
+    try {
+      const res = await fetch(`/api/forms/${formId}/approve`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          signature: "HRD",
+          comments: "",
+        }),
+      })
+
+      if (!res.ok) {
+        throw new Error("Approve failed")
+      }
+
+      const result = await res.json()
+      dashboardCache.clear()
+await fetchForms(pagination.page)
+
+
+      // 🔥 SATU-SATUNYA SOURCE OF TRUTH SETELAH APPROVE
+      setForms((prev) =>
+        prev.map((f) =>
+          f.id === formId
+            ? {
+                ...f,
+                ...result.form,
+              }
+            : f
+        )
+      )
+
+      // optional: clear FE cache biar fetch selanjutnya bersih
+      dashboardCache.clear()
+
+      // ❌ JANGAN FETCH ULANG DI SINI
+      // ❌ JANGAN fetchForms(...)
+    } catch (err) {
+      console.error("Approve error:", err)
+      alert("Failed to approve form")
+    }
+  },
+  [] // 🔥 fetchForms & pagination TIDAK DIBUTUHKAN
+)
+
+  // ✅ Memoized filter update functions
+  const updateFilters = useCallback((newFilters: Partial<DashboardFilters>) => {
+    setFilters((prev) => ({ ...prev, ...newFilters }))
+    setPagination((prev) => ({ ...prev, page: 1 }))
+  }, [])
+
+  const handleTabChange = useCallback(
+    (value: string) => {
+      updateFilters({ activeTab: value })
+    },
+    [updateFilters],
+  )
+
+  // ✅ FIXED: Improved handlePageChange function
+  const handlePageChange = useCallback(
+    (newPage: number) => {
+      console.log("🔄 Page change requested:", newPage)
+      console.log("📊 Current pagination:", pagination)
+
+      // ✅ Validate page number
+      if (newPage < 1 || newPage > pagination.totalPages) {
+        console.warn("⚠️ Invalid page number:", newPage)
+        return
+      }
+
+      // ✅ Update pagination state first
+      setPagination((prev) => ({
+        ...prev,
+        page: newPage,
+      }))
+
+      // ✅ Fetch data for the new page
+      fetchForms(newPage, debouncedFilters) // Force refresh for page changes
+    },
+    [fetchForms, debouncedFilters, pagination],
+  )
+
+  // ✅ Memoized delete functions
+  const handleDeleteClick = useCallback((formId: string) => {
+    setFormToDelete(formId)
+    setShowDeleteDialog(true)
+  }, [])
+
+  const handleViewForm = useCallback(
+    async (formId: string) => {
+      setViewingFormId(formId)
+
+      // Show loading for a brief moment to provide user feedback
+      await new Promise((resolve) => setTimeout(resolve, 300))
+
+      // Navigate to form details
+      router.push(`/dashboard/form/${formId}`)
+    },
+    [router],
+  )
+
+  const confirmDelete = useCallback(async () => {
+    if (!formToDelete) return
+
+    setIsDeleting(true)
+
+    try {
+      const response = await fetch(`/api/forms/${formToDelete}`, {
+        method: "DELETE",
+      })
+
+      if (response.ok) {
+        // ✅ Clear cache and refetch data
+        dashboardCache.clear()
+
+        setForms((prevForms: Form[]) => prevForms.filter((form) => form.id !== formToDelete))
+
+        setPagination((prev) => ({
+          ...prev,
+          total: prev.total - 1,
+        }))
+
+        setShowDeleteDialog(false)
+        setFormToDelete(null)
+
+        // Refetch data to ensure consistency
+        fetchForms(pagination.page, debouncedFilters)
+      } else {
+        throw new Error("Failed to delete form")
+      }
+    } catch (error) {
+      console.error("Error deleting form:", error)
+      alert("Failed to delete form. Please try again.")
+    } finally {
+      setIsDeleting(false)
+    }
+  }, [formToDelete, pagination.page, debouncedFilters, fetchForms])
+
+  const cancelDelete = useCallback(() => {
+    setShowDeleteDialog(false)
+    setFormToDelete(null)
+  }, [])
+
+  // ✅ Export functions with better URL building
+  const buildExportUrl = useCallback(
+    (format: string, type?: string) => {
+      const params = new URLSearchParams()
+      params.append("format", format)
+      params.append("getAllForms", "true")
+
+      if (type) {
+        params.append("type", type)
+      }
+
+      if (debouncedFilters.selectedMonth) {
+        params.append("selectedMonth", JSON.stringify(debouncedFilters.selectedMonth))
+      } else if (debouncedFilters.timeFilter !== "all") {
+        params.append("timeFilter", debouncedFilters.timeFilter)
+      }
+
+      if (debouncedFilters.requestTypeFilter !== "all" && !type) {
+        params.append("type", debouncedFilters.requestTypeFilter)
+      }
+
+      if (debouncedFilters.departmentFilter !== "all") {
+        params.append("department", debouncedFilters.departmentFilter)
+      }
+
+      return `/api/forms?${params.toString()}`
+    },
+    [debouncedFilters],
+  )
+
+  const downloadAsExcel = useCallback(() => {
+    window.location.href = buildExportUrl("excel")
+  }, [buildExportUrl])
+
+  const downloadAsPDF = useCallback(() => {
+    window.location.href = buildExportUrl("pdf")
+  }, [buildExportUrl])
+
+  const downloadLeaveFormsAsExcel = useCallback(() => {
+    window.location.href = buildExportUrl("excel", "leave")
+  }, [buildExportUrl])
+
+  const downloadOvertimeFormsAsExcel = useCallback(() => {
+    window.location.href = buildExportUrl("excel", "overtime")
+  }, [buildExportUrl])
+
+  const downloadLeaveFormsAsPDF = useCallback(() => {
+    window.location.href = buildExportUrl("pdf", "leave")
+  }, [buildExportUrl])
+
+  const downloadOvertimeFormsAsPDF = useCallback(() => {
+    window.location.href = buildExportUrl("pdf", "overtime")
+  }, [buildExportUrl])
+
+  // ✅ FIXED: Effects with proper dependencies
+  useEffect(() => {
+  fetchForms(pagination.page, debouncedFilters)
+}, [
+  debouncedFilters.activeTab,
+  debouncedFilters.timeFilter,
+  debouncedFilters.selectedMonth,
+  debouncedFilters.departmentFilter,
+  debouncedFilters.requestTypeFilter,
+])
+  
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-900">
       <DashboardHeader user={user} />
@@ -929,7 +1094,7 @@ export default function HRDDashboard({ user }: { user: any }) {
           </div>
         </div>
 
-        {/* Stats Overview */}
+        {/* ✅ Stats Overview with memoized data */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
           <Card className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
             <CardHeader className="pb-2">
@@ -937,7 +1102,12 @@ export default function HRDDashboard({ user }: { user: any }) {
             </CardHeader>
             <CardContent>
               <div className="flex justify-between items-end">
-                <div className="text-2xl font-bold">{stats.pendingLeave + stats.pendingOvertime}</div>
+                <div className="text-2xl font-bold">
+                  {stats.pendingLeave +
+                    stats.pendingOvertime +
+                    stats.pendingJobRequisition +
+                    stats.pendingTrainingRequest}
+                </div>
                 <Badge
                   variant="outline"
                   className="bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-900/20 dark:text-amber-300 dark:border-amber-800"
@@ -957,6 +1127,40 @@ export default function HRDDashboard({ user }: { user: any }) {
                   <span>{stats.pendingOvertimePercent}%</span>
                 </div>
                 <Progress value={stats.pendingOvertimePercent} className="h-1.5 bg-slate-100 dark:bg-slate-700" />
+                <div className="flex justify-between text-xs">
+                  <span>Job Req ({stats.pendingJobRequisition})</span>
+                  <span>
+                    {stats.totalJobRequisition
+                      ? Math.round((stats.pendingJobRequisition / stats.totalJobRequisition) * 100)
+                      : 0}
+                    %
+                  </span>
+                </div>
+                <Progress
+                  value={
+                    stats.totalJobRequisition
+                      ? Math.round((stats.pendingJobRequisition / stats.totalJobRequisition) * 100)
+                      : 0
+                  }
+                  className="h-1.5 bg-slate-100 dark:bg-slate-700"
+                />
+                <div className="flex justify-between text-xs">
+                  <span>Training ({stats.pendingTrainingRequest})</span>
+                  <span>
+                    {stats.totalTrainingRequest
+                      ? Math.round((stats.pendingTrainingRequest / stats.totalTrainingRequest) * 100)
+                      : 0}
+                    %
+                  </span>
+                </div>
+                <Progress
+                  value={
+                    stats.totalTrainingRequest
+                      ? Math.round((stats.pendingTrainingRequest / stats.totalTrainingRequest) * 100)
+                      : 0
+                  }
+                  className="h-1.5 bg-slate-100 dark:bg-slate-700"
+                />
               </div>
             </CardContent>
           </Card>
@@ -967,7 +1171,12 @@ export default function HRDDashboard({ user }: { user: any }) {
             </CardHeader>
             <CardContent>
               <div className="flex justify-between items-end">
-                <div className="text-2xl font-bold">{stats.approvedLeave + stats.approvedOvertime}</div>
+                <div className="text-2xl font-bold">
+                  {stats.approvedLeave +
+                    stats.approvedOvertime +
+                    stats.approvedJobRequisition +
+                    stats.approvedTrainingRequest}
+                </div>
                 <Badge
                   variant="outline"
                   className="bg-slate-50 text-slate-700 border-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:border-slate-700"
@@ -991,6 +1200,20 @@ export default function HRDDashboard({ user }: { user: any }) {
                   </div>
                   <p className="text-lg font-semibold mt-1">{stats.approvedOvertime}</p>
                 </div>
+                <div className="bg-slate-50 dark:bg-slate-900 p-2 rounded-md">
+                  <div className="flex items-center gap-1.5">
+                    <Users className="h-3.5 w-3.5 text-slate-500" />
+                    <span className="text-xs font-medium">Job Req</span>
+                  </div>
+                  <p className="text-lg font-semibold mt-1">{stats.approvedJobRequisition}</p>
+                </div>
+                <div className="bg-slate-50 dark:bg-slate-900 p-2 rounded-md">
+                  <div className="flex items-center gap-1.5">
+                    <GraduationCap className="h-3.5 w-3.5 text-slate-500" />
+                    <span className="text-xs font-medium">Training</span>
+                  </div>
+                  <p className="text-lg font-semibold mt-1">{stats.approvedTrainingRequest}</p>
+                </div>
               </div>
             </CardContent>
           </Card>
@@ -1001,7 +1224,12 @@ export default function HRDDashboard({ user }: { user: any }) {
             </CardHeader>
             <CardContent>
               <div className="flex justify-between items-end">
-                <div className="text-2xl font-bold">{stats.rejectedLeave + stats.rejectedOvertime}</div>
+                <div className="text-2xl font-bold">
+                  {stats.rejectedLeave +
+                    stats.rejectedOvertime +
+                    stats.rejectedJobRequisition +
+                    stats.rejectedTrainingRequest}
+                </div>
                 <Badge
                   variant="outline"
                   className="bg-red-50 text-red-700 border-red-200 dark:bg-red-900/20 dark:text-red-300 dark:border-red-800"
@@ -1025,6 +1253,20 @@ export default function HRDDashboard({ user }: { user: any }) {
                   </div>
                   <p className="text-lg font-semibold mt-1">{stats.rejectedOvertime}</p>
                 </div>
+                <div className="bg-slate-50 dark:bg-slate-900 p-2 rounded-md">
+                  <div className="flex items-center gap-1.5">
+                    <Users className="h-3.5 w-3.5 text-slate-500" />
+                    <span className="text-xs font-medium">Job Req</span>
+                  </div>
+                  <p className="text-lg font-semibold mt-1">{stats.rejectedJobRequisition}</p>
+                </div>
+                <div className="bg-slate-50 dark:bg-slate-900 p-2 rounded-md">
+                  <div className="flex items-center gap-1.5">
+                    <GraduationCap className="h-3.5 w-3.5 text-slate-500" />
+                    <span className="text-xs font-medium">Training</span>
+                  </div>
+                  <p className="text-lg font-semibold mt-1">{stats.rejectedTrainingRequest}</p>
+                </div>
               </div>
             </CardContent>
           </Card>
@@ -1035,7 +1277,7 @@ export default function HRDDashboard({ user }: { user: any }) {
             </CardHeader>
             <CardContent>
               <div className="flex justify-between items-end">
-                <div className="text-2xl font-bold">{stats.totalRequests || 100}</div>
+                <div className="text-2xl font-bold">{stats.totalRequests}</div>
                 <Badge
                   variant="outline"
                   className="bg-slate-50 text-slate-700 border-slate-200 dark:bg-slate-900 dark:text-slate-300 dark:border-slate-700"
@@ -1058,7 +1300,7 @@ export default function HRDDashboard({ user }: { user: any }) {
                       </span>
                     </div>
                   </div>
-                  <div className="overflow-hidden h-2 mb-4 text-xs flex rounded bg-slate-100 dark:bg-slate-700">
+                  <div className="overflow-hidden h-2 mb-2 text-xs flex rounded bg-slate-100 dark:bg-slate-700">
                     <div
                       style={{
                         width: `${stats.totalRequests ? Math.round((stats.totalLeave / stats.totalRequests) * 100) : 0}%`,
@@ -1080,10 +1322,55 @@ export default function HRDDashboard({ user }: { user: any }) {
                       </span>
                     </div>
                   </div>
-                  <div className="overflow-hidden h-2 text-xs flex rounded bg-slate-100 dark:bg-slate-700">
+                  <div className="overflow-hidden h-2 mb-2 text-xs flex rounded bg-slate-100 dark:bg-slate-700">
                     <div
                       style={{
                         width: `${stats.totalRequests ? Math.round((stats.totalOvertime / stats.totalRequests) * 100) : 0}%`,
+                      }}
+                      className="shadow-none flex flex-col text-center whitespace-nowrap text-white justify-center bg-slate-500"
+                    ></div>
+                  </div>
+                </div>
+                <div className="relative pt-1">
+                  <div className="flex mb-2 items-center justify-between">
+                    <div>
+                      <span className="text-xs font-semibold inline-block py-1 px-2 uppercase rounded-full bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                        Job Req
+                      </span>
+                    </div>
+                    <div className="text-right">
+                      <span className="text-xs font-semibold inline-block text-slate-600 dark:text-slate-300">
+                        {stats.totalRequests ? Math.round((stats.totalJobRequisition / stats.totalRequests) * 100) : 0}%
+                      </span>
+                    </div>
+                  </div>
+                  <div className="overflow-hidden h-2 mb-2 text-xs flex rounded bg-slate-100 dark:bg-slate-700">
+                    <div
+                      style={{
+                        width: `${stats.totalRequests ? Math.round((stats.totalJobRequisition / stats.totalRequests) * 100) : 0}%`,
+                      }}
+                      className="shadow-none flex flex-col text-center whitespace-nowrap text-white justify-center bg-slate-500"
+                    ></div>
+                  </div>
+                </div>
+                <div className="relative pt-1">
+                  <div className="flex mb-2 items-center justify-between">
+                    <div>
+                      <span className="text-xs font-semibold inline-block py-1 px-2 uppercase rounded-full bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                        Training
+                      </span>
+                    </div>
+                    <div className="text-right">
+                      <span className="text-xs font-semibold inline-block text-slate-600 dark:text-slate-300">
+                        {stats.totalRequests ? Math.round((stats.totalTrainingRequest / stats.totalRequests) * 100) : 0}
+                        %
+                      </span>
+                    </div>
+                  </div>
+                  <div className="overflow-hidden h-2 text-xs flex rounded bg-slate-100 dark:bg-slate-700">
+                    <div
+                      style={{
+                        width: `${stats.totalRequests ? Math.round((stats.totalTrainingRequest / stats.totalRequests) * 100) : 0}%`,
                       }}
                       className="shadow-none flex flex-col text-center whitespace-nowrap text-white justify-center bg-slate-500"
                     ></div>
@@ -1094,6 +1381,7 @@ export default function HRDDashboard({ user }: { user: any }) {
           </Card>
         </div>
 
+        {/* Filters section with memoized components */}
         <div className="mb-8">
           <div className="flex flex-col sm:flex-row gap-4">
             <div className="relative flex-1">
@@ -1129,20 +1417,19 @@ export default function HRDDashboard({ user }: { user: any }) {
             </div>
             <div className="flex gap-2 flex-wrap">
               <MonthYearPicker
-                selectedMonth={selectedMonth}
-                setSelectedMonth={setSelectedMonth}
+                selectedMonth={filters.selectedMonth}
+                setSelectedMonth={(value) => updateFilters({ selectedMonth: value })}
                 setPagination={setPagination}
               />
 
               <Select
-                value={timeFilter}
-                onValueChange={(value) => {
-                  setTimeFilter(value)
-                  // Clear date range when selecting a predefined time filter
-                  if (value !== "all") {
-                    setSelectedMonth(null)
-                  }
-                }}
+                value={filters.timeFilter}
+                onValueChange={(value) =>
+                  updateFilters({
+                    timeFilter: value,
+                    selectedMonth: value !== "all" ? null : filters.selectedMonth,
+                  })
+                }
               >
                 <SelectTrigger className="w-[140px] border-slate-300 dark:border-slate-700">
                   <div className="flex items-center gap-2">
@@ -1160,7 +1447,7 @@ export default function HRDDashboard({ user }: { user: any }) {
 
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                  <Button variant="outline" className="gap-2 border-slate-300 dark:border-slate-700">
+                  <Button variant="outline" className="gap-2 border-slate-300 dark:border-slate-700 bg-transparent">
                     <FileDown className="h-4 w-4" />
                     <span className="hidden sm:inline">Export</span>
                     <ChevronDown className="h-4 w-4 ml-1" />
@@ -1201,7 +1488,7 @@ export default function HRDDashboard({ user }: { user: any }) {
 
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                  <Button variant="outline" className="gap-2 border-slate-300 dark:border-slate-700">
+                  <Button variant="outline" className="gap-2 border-slate-300 dark:border-slate-700 bg-transparent">
                     <FileText className="h-4 w-4" />
                     <span className="hidden sm:inline">Request Type</span>
                     <ChevronDown className="h-4 w-4 ml-1" />
@@ -1210,40 +1497,46 @@ export default function HRDDashboard({ user }: { user: any }) {
                 <DropdownMenuContent align="end">
                   <DropdownMenuLabel>Filter by request type</DropdownMenuLabel>
                   <DropdownMenuSeparator />
-                  <DropdownMenuItem onClick={() => setRequestTypeFilter("all")}>
+                  <DropdownMenuItem onClick={() => updateFilters({ requestTypeFilter: "all" })}>
                     All Requests
-                    {requestTypeFilter === "all" && <Check className="h-4 w-4 ml-auto" />}
+                    {filters.requestTypeFilter === "all" && <Check className="h-4 w-4 ml-auto" />}
                   </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => setRequestTypeFilter("leave")}>
+                  <DropdownMenuItem onClick={() => updateFilters({ requestTypeFilter: "leave" })}>
                     Leave Requests
-                    {requestTypeFilter === "leave" && <Check className="h-4 w-4 ml-auto" />}
+                    {filters.requestTypeFilter === "leave" && <Check className="h-4 w-4 ml-auto" />}
                   </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => setRequestTypeFilter("overtime")}>
+                  <DropdownMenuItem onClick={() => updateFilters({ requestTypeFilter: "overtime" })}>
                     Overtime Requests
-                    {requestTypeFilter === "overtime" && <Check className="h-4 w-4 ml-auto" />}
+                    {filters.requestTypeFilter === "overtime" && <Check className="h-4 w-4 ml-auto" />}
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
             </div>
           </div>
 
-          {(timeFilter !== "all" || selectedMonth) && (
+          {(filters.timeFilter !== "all" || filters.selectedMonth) && (
             <div className="mt-4 p-3 bg-slate-100 border border-slate-200 rounded-md flex items-center dark:bg-slate-800 dark:border-slate-700">
               <Calendar className="h-5 w-5 text-slate-500 mr-2 flex-shrink-0" />
               <p className="text-sm text-slate-700 dark:text-slate-300">
-                {selectedMonth ? (
+                {filters.selectedMonth ? (
                   <>
                     Showing forms for{" "}
                     <span className="font-medium">
-                      {new Date(selectedMonth.year, selectedMonth.month).toLocaleString("default", { month: "long" })}{" "}
-                      {selectedMonth.year}
+                      {new Date(filters.selectedMonth.year, filters.selectedMonth.month).toLocaleString("default", {
+                        month: "long",
+                      })}{" "}
+                      {filters.selectedMonth.year}
                     </span>
                   </>
-                ) : timeFilter !== "all" ? (
+                ) : filters.timeFilter !== "all" ? (
                   <>
                     Showing forms for{" "}
                     <span className="font-medium">
-                      {timeFilter === "week" ? "this week" : timeFilter === "month" ? "this month" : "this year"}
+                      {filters.timeFilter === "week"
+                        ? "this week"
+                        : filters.timeFilter === "month"
+                          ? "this month"
+                          : "this year"}
                     </span>
                   </>
                 ) : null}
@@ -1253,12 +1546,8 @@ export default function HRDDashboard({ user }: { user: any }) {
                 size="sm"
                 className="ml-auto h-7 px-2 text-xs text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700"
                 onClick={() => {
-                  setTimeFilter("all")
-                  setSelectedMonth(null)
-                  // Reset to page 1 when clearing filters
-                  setPagination((prev) => ({ ...prev, page: 1 }))
-                  // Refetch forms without date filters
-                  fetchForms(1, activeTab)
+                  updateFilters({ timeFilter: "all", selectedMonth: null })
+                  dashboardCache.clear()
                 }}
               >
                 Clear
@@ -1267,7 +1556,11 @@ export default function HRDDashboard({ user }: { user: any }) {
           )}
         </div>
 
-        <Tabs defaultValue="all" className="w-full" onValueChange={handleTabChange}>
+        <Tabs
+  value={filters.activeTab}
+  onValueChange={handleTabChange}
+  className="w-full"
+>
           <TabsList className="mb-6 grid grid-cols-4 w-full max-w-md mx-auto bg-slate-100 dark:bg-slate-800 p-1">
             <TabsTrigger
               value="all"
@@ -1296,34 +1589,69 @@ export default function HRDDashboard({ user }: { user: any }) {
           </TabsList>
 
           <TabsContent value="all">
-            <CombinedFormsList forms={filteredForms} isLoading={isLoading} deleteForm={handleDeleteClick} />
+            <CombinedFormsList
+              forms={filteredForms}
+              isLoading={isLoading}
+              deleteForm={handleDeleteClick}
+              handleViewForm={handleViewForm}
+              viewingFormId={viewingFormId}
+              onApprove={handleApprove}
+            />
           </TabsContent>
 
           <TabsContent value="pending">
-            <CombinedFormsList forms={filteredForms} isLoading={isLoading} deleteForm={handleDeleteClick} />
+            <CombinedFormsList
+              forms={filteredForms}
+              isLoading={isLoading}
+              deleteForm={handleDeleteClick}
+              handleViewForm={handleViewForm}
+              viewingFormId={viewingFormId}
+              onApprove={handleApprove}
+            />
           </TabsContent>
 
           <TabsContent value="approved">
-            <CombinedFormsList forms={filteredForms} isLoading={isLoading} deleteForm={handleDeleteClick} />
+            <CombinedFormsList
+              forms={filteredForms}
+              isLoading={isLoading}
+              deleteForm={handleDeleteClick}
+              handleViewForm={handleViewForm}
+              viewingFormId={viewingFormId}
+              onApprove={handleApprove}
+            />
           </TabsContent>
 
           <TabsContent value="rejected">
-            <CombinedFormsList forms={filteredForms} isLoading={isLoading} deleteForm={handleDeleteClick} />
+            <CombinedFormsList
+              forms={filteredForms}
+              isLoading={isLoading}
+              deleteForm={handleDeleteClick}
+              handleViewForm={handleViewForm}
+              viewingFormId={viewingFormId}
+              onApprove={handleApprove}
+            />
           </TabsContent>
         </Tabs>
 
-        {/* Pagination Controls */}
+        {/* ✅ FIXED: Improved Pagination Controls with better debugging */}
         {pagination.totalPages > 1 && (
           <div className="flex justify-between items-center mt-6 bg-white dark:bg-slate-800 p-3 rounded-lg border border-slate-200 dark:border-slate-700">
             <div className="text-sm text-slate-500 dark:text-slate-400">
               Showing {filteredForms.length} of {pagination.total} results
+              {/* ✅ Debug info */}
+              <span className="ml-2 text-xs opacity-60">
+                (Page {pagination.page}/{pagination.totalPages})
+              </span>
             </div>
             <div className="flex gap-2">
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => handlePageChange(pagination.page - 1)}
-                disabled={!pagination.hasPrevPage}
+                onClick={() => {
+                  console.log("⬅️ Previous button clicked")
+                  handlePageChange(pagination.page - 1)
+                }}
+                disabled={!pagination.hasPrevPage || pagination.page <= 1}
                 className="flex items-center gap-1"
               >
                 <ChevronLeft className="h-4 w-4" />
@@ -1337,8 +1665,11 @@ export default function HRDDashboard({ user }: { user: any }) {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => handlePageChange(pagination.page + 1)}
-                disabled={!pagination.hasNextPage}
+                onClick={() => {
+                  console.log("➡️ Next button clicked")
+                  handlePageChange(pagination.page + 1)
+                }}
+                disabled={!pagination.hasNextPage || pagination.page >= pagination.totalPages}
                 className="flex items-center gap-1"
               >
                 Next
@@ -1347,6 +1678,7 @@ export default function HRDDashboard({ user }: { user: any }) {
             </div>
           </div>
         )}
+
         {/* Delete Confirmation Dialog */}
         <Dialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
           <DialogContent className="sm:max-w-md">
@@ -1366,7 +1698,7 @@ export default function HRDDashboard({ user }: { user: any }) {
                 variant="outline"
                 onClick={cancelDelete}
                 disabled={isDeleting}
-                className="border-slate-200 dark:border-slate-700"
+                className="border-slate-200 dark:border-slate-700 bg-transparent"
               >
                 Cancel
               </Button>
@@ -1397,11 +1729,22 @@ export default function HRDDashboard({ user }: { user: any }) {
   )
 }
 
-function CombinedFormsList({
+// ✅ FIXED: Memoized CombinedFormsList component with better error handling
+const CombinedFormsList = React.memo(function CombinedFormsList({
   forms,
   isLoading,
   deleteForm,
-}: { forms: Form[]; isLoading: boolean; deleteForm: (formId: string) => void }) {
+  handleViewForm,
+  viewingFormId,
+  onApprove,
+}: {
+  forms: Form[]
+  isLoading: boolean
+  deleteForm: (formId: string) => void
+  handleViewForm: (formId: string) => void
+  viewingFormId: string | null
+  onApprove: (formId: string) => Promise<void>
+}) {
   if (isLoading) {
     return (
       <div className="space-y-4">
@@ -1437,7 +1780,7 @@ function CombinedFormsList({
           <p className="text-muted-foreground max-w-md mb-6">
             There are no requests matching your current filters. Try changing your search criteria.
           </p>
-          <Button variant="outline" className="gap-2" onClick={() => window.location.reload()}>
+          <Button variant="outline" className="gap-2 bg-transparent" onClick={() => window.location.reload()}>
             <Filter className="h-4 w-4" />
             Clear Filters
           </Button>
@@ -1453,6 +1796,9 @@ function CombinedFormsList({
           <table className="w-full">
             <thead>
               <tr className="bg-slate-50 dark:bg-slate-900/50">
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">
+                  Form ID
+                </th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">
                   Type
                 </th>
@@ -1479,6 +1825,9 @@ function CombinedFormsList({
             <tbody className="divide-y divide-slate-200 dark:divide-slate-700">
               {forms.map((form) => (
                 <tr key={form.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/60">
+                  <td className="px-4 py-4 whitespace-nowrap text-sm font-medium text-slate-700 dark:text-slate-300">
+                    {formatFormId(form)}
+                  </td>
                   <td className="px-4 py-4 whitespace-nowrap">
                     {form.type === "leave" ? (
                       <div className="flex items-center">
@@ -1489,7 +1838,7 @@ function CombinedFormsList({
                           <span className="text-sm font-medium">Leave</span>
                         </div>
                       </div>
-                    ) : (
+                    ) : form.type === "overtime" ? (
                       <div className="flex items-center">
                         <div className="flex-shrink-0 h-8 w-8 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center">
                           <Clock3 className="h-4 w-4 text-slate-600 dark:text-slate-400" />
@@ -1498,72 +1847,134 @@ function CombinedFormsList({
                           <span className="text-sm font-medium">Overtime</span>
                         </div>
                       </div>
+                    ) : form.type === "job-requisition" ? (
+                      <div className="flex items-center">
+                        <div className="flex-shrink-0 h-8 w-8 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center">
+                          <Users className="h-4 w-4 text-slate-600 dark:text-slate-400" />
+                        </div>
+                        <div className="ml-3">
+                          <span className="text-sm font-medium">Job Requisition</span>
+                        </div>
+                      </div>
+                    ) : form.type === "training-request" ? (
+                      <div className="flex items-center">
+                        <div className="flex-shrink-0 h-8 w-8 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center">
+                          <GraduationCap className="h-4 w-4 text-slate-600 dark:text-slate-400" />
+                        </div>
+                        <div className="ml-3">
+                          <span className="text-sm font-medium">Training Request</span>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex items-center">
+                        <div className="flex-shrink-0 h-8 w-8 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center">
+                          <FileText className="h-4 w-4 text-slate-600 dark:text-slate-400" />
+                        </div>
+                        <div className="ml-3">
+                          <span className="text-sm font-medium">Other</span>
+                        </div>
+                      </div>
                     )}
                   </td>
                   <td className="px-4 py-4">
                     <div className="flex flex-wrap gap-1">
-                      {form.data.employees && form.data.employees.length > 0 ? (
+                      {form.data?.employees && form.data.employees.length > 0 ? (
                         form.data.employees.map((emp: Employee, index: number) => (
-                          <div key={`${emp.employeeId}-${index}`} className="text-sm">
+                          <div key={`${getEmployeeId(form, emp)}-${index}`} className="text-sm">
                             <span className="font-medium">{emp.name}</span>{" "}
-                            <span className="text-slate-500">({emp.employeeId})</span>
-                            {index < form.data.employees.length - 1 && <span className="ml-1 mr-1">•</span>}
+                            <span className="text-slate-500">({getEmployeeId(form, emp)})</span>
+                            {index < (form.data?.employees?.length ?? 0) - 1 && <span className="ml-1 mr-1">•</span>}
                           </div>
                         ))
                       ) : (
                         <div className="text-sm">
                           <span className="font-medium">{form.employee?.name || "-"}</span>{" "}
-                          <span className="text-slate-500">({form.employee?.employeeId || "-"})</span>
+                          <span className="text-slate-500">({getEmployeeId(form, form.employee) || "-"})</span>
                         </div>
                       )}
                     </div>
                   </td>
                   <td className="px-4 py-4 whitespace-nowrap">
                     <div className="text-sm">
-                      {form.data.employees && form.data.employees[0]
-                        ? form.data.employees[0].department
-                        : form.employee?.department || "-"}
+                      {form.data?.employees?.[0]?.department || form.employee?.department || "-"}
                     </div>
                     <div className="text-xs text-slate-500 dark:text-slate-400">
-                      {form.data.employees && form.data.employees[0]
-                        ? form.data.employees[0].position
-                        : form.employee?.position || "-"}
+                      {form.data?.employees?.[0]?.position || form.employee?.position || "-"}
                     </div>
                   </td>
                   <td className="px-4 py-4">
                     {form.type === "leave" ? (
                       <div className="text-sm">
                         <div>
-                          <span className="font-medium">Type:</span> {form.data.leaveType}
+                          <span className="font-medium">Type:</span> {form.data?.leaveType}
                         </div>
                         <div>
                           <span className="font-medium">Period:</span>{" "}
-                          {new Date(form.data.startDate).toLocaleDateString()} -{" "}
-                          {new Date(form.data.endDate).toLocaleDateString()}
+                          {form.data?.startDate && form.data?.endDate ? (
+                            <>
+                              {new Date(form.data.startDate).toLocaleDateString()} -{" "}
+                              {new Date(form.data.endDate).toLocaleDateString()}
+                            </>
+                          ) : (
+                            "N/A"
+                          )}
                         </div>
                         <div>
                           <span className="font-medium">Days:</span>{" "}
                           <span className="bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 px-2 py-0.5 rounded text-xs font-medium">
-                            {form.data.totalDays}
+                            {form.data?.totalDays || "N/A"}
                           </span>
                         </div>
                       </div>
-                    ) : (
+                    ) : form.type === "overtime" ? (
                       <div className="text-sm">
                         <div>
-                          <span className="font-medium">Date:</span> {new Date(form.data.date).toLocaleDateString()}
+                          <span className="font-medium">Date:</span>{" "}
+                          {form.data?.date ? new Date(form.data.date).toLocaleDateString() : "N/A"}
                         </div>
                         <div>
                           <span className="font-medium">Hours:</span>{" "}
                           <span className="bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 px-2 py-0.5 rounded text-xs font-medium">
-                            {form.data.hours}
+                            {form.data?.hours || "N/A"}
                           </span>
                         </div>
                         <div className="max-w-xs">
                           <span className="font-medium">Reason:</span>{" "}
-                          <span className="line-clamp-1">{form.data.reason}</span>
+                          <span className="line-clamp-1">{form.data?.reason || "N/A"}</span>
                         </div>
                       </div>
+                    ) : form.type === "job-requisition" ? (
+                      <div className="text-sm">
+                        <div>
+                          <span className="font-medium">Position:</span> {form.data?.requestPosition || "N/A"}
+                        </div>
+                        <div>
+                          <span className="font-medium">Department:</span> {form.data?.departmentName || "N/A"}
+                        </div>
+                        <div>
+                          <span className="font-medium">Type:</span>{" "}
+                          <span className="bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 px-2 py-0.5 rounded text-xs font-medium">
+                            {form.data?.employmentType || "N/A"}
+                          </span>
+                        </div>
+                      </div>
+                    ) : form.type === "training-request" ? (
+                      <div className="text-sm">
+                        <div>
+                          <span className="font-medium">Training:</span> {form.data?.trainingTitle || "N/A"}
+                        </div>
+                        <div>
+                          <span className="font-medium">Provider:</span> {form.data?.trainingProvider || "PT"}
+                        </div>
+                        <div>
+                          <span className="font-medium">Mode:</span>{" "}
+                          <span className="bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 px-2 py-0.5 rounded text-xs font-medium">
+                            {form.data?.trainingMode || "N/A"}
+                          </span>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="text-sm text-slate-500">Unknown form type</div>
                     )}
                   </td>
                   <td className="px-4 py-4 whitespace-nowrap">
@@ -1574,26 +1985,31 @@ function CombinedFormsList({
                   </td>
                   <td className="px-4 py-4 whitespace-nowrap text-right text-sm font-medium">
                     <div className="flex justify-end gap-2">
-                      <Link href={`/dashboard/form/${form.id}`}>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="text-xs font-medium flex items-center transition-all text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
-                        >
-                          <Eye className="h-3.5 w-3.5 mr-1" />
-                          View
-                        </Button>
-                      </Link>
-                      {form.status === "pending" && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="text-xs font-medium flex items-center transition-all text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+                        onClick={() => handleViewForm(form.id)}
+                        disabled={viewingFormId === form.id}
+                      >
+                        {viewingFormId === form.id ? (
+                          <>
+                            <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
+                            Loading...
+                          </>
+                        ) : (
+                          <>
+                            <Eye className="h-3.5 w-3.5 mr-1" />
+                            View
+                          </>
+                        )}
+                      </Button>
+                      {normalizeStatus(form.status) === "PENDING" && (
                         <>
                           <TooltipProvider>
                             <Tooltip>
                               <TooltipTrigger asChild>
-                                <Button
-                                  variant="ghost"
-                                  size="icon"
-                                  className="h-8 w-8 text-slate-600 hover:text-slate-700 hover:bg-slate-100 dark:text-slate-400 dark:hover:text-slate-300 dark:hover:bg-slate-800"
-                                >
+                                <Button variant="ghost" size="icon" onClick={() => onApprove(form.id)}>
                                   <ThumbsUp className="h-4 w-4" />
                                 </Button>
                               </TooltipTrigger>
@@ -1602,6 +2018,7 @@ function CombinedFormsList({
                               </TooltipContent>
                             </Tooltip>
                           </TooltipProvider>
+
                           <TooltipProvider>
                             <Tooltip>
                               <TooltipTrigger asChild>
@@ -1620,6 +2037,7 @@ function CombinedFormsList({
                           </TooltipProvider>
                         </>
                       )}
+
                       <TooltipProvider>
                         <Tooltip>
                           <TooltipTrigger asChild>
@@ -1647,4 +2065,4 @@ function CombinedFormsList({
       </div>
     </div>
   )
-}
+})

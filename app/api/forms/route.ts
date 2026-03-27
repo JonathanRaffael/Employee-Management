@@ -2,13 +2,13 @@ import { NextResponse } from "next/server"
 import { getServerSession } from "next-auth"
 import * as XLSX from "xlsx"
 import { jsPDF } from "jspdf"
-import { endOfDay, startOfWeek, startOfMonth, startOfYear, endOfWeek, endOfMonth, endOfYear } from "date-fns"
+import { endOfDay, startOfWeek, startOfMonth, startOfYear, endOfWeek, endOfMonth, endOfYear, format } from "date-fns"
 
 import { authOptions } from "@/lib/auth"
 import { prisma } from "@/lib/prisma"
 import { sendMail } from "@/lib/mail"
 
-// Define a type for the session user to include the properties you're using
+// Define a type for the session user
 interface SessionUser {
   id: string
   name?: string | null
@@ -17,7 +17,6 @@ interface SessionUser {
   role: string
 }
 
-// Extend the Session type to use our custom user type
 interface CustomSession {
   user: SessionUser
 }
@@ -27,15 +26,24 @@ interface LeaveBalance {
   remainingAfter: number
 }
 
+interface UploadedDocumentFile {
+  documentType: string
+  fileName: string
+  fileData: string
+}
+
 interface LeaveFormData {
-  employees: { name: string; position: string; employeeId: string; department: string }[]
+  employees: { name: string; position: string; employeeCode: string; department: string }[]
   leaveType: string
   startDate: string
   endDate: string
   totalDays: string
   reason: string
   supportingDocuments: string[]
+  uploadedDocumentFiles?: UploadedDocumentFile[]
   leaveBalance?: LeaveBalance
+  dateSelectionMode?: "range" | "manual"
+  manualDates?: string[]
 }
 
 interface FormSubmissionData {
@@ -46,37 +54,249 @@ interface FormSubmissionData {
   jumlahHariCuti: number
 }
 
-// Cache configuration
-const CACHE_TTL = 60 * 1000 // 1 minute cache TTL
-const formCache = new Map()
-const countCache = new Map()
+// Optimized cache with better performance
+class HighPerformanceCache {
+  private cache = new Map<string, { data: any; timestamp: number; size: number; hits: number }>()
+  private totalSize = 0
+  private readonly maxSize: number
+  private readonly maxTotalSize: number
+  private readonly ttl: number
 
-// Cache key generator
-function generateCacheKey(params: URLSearchParams): string {
-  return Array.from(params.entries())
+  constructor(maxSize = 100, maxTotalSize = 50 * 1024 * 1024, ttl = 60000) {
+    this.maxSize = maxSize
+    this.maxTotalSize = maxTotalSize
+    this.ttl = ttl
+  }
+
+  get(key: string) {
+    const entry = this.cache.get(key)
+    if (!entry) return null
+
+    if (Date.now() - entry.timestamp > this.ttl) {
+      this.totalSize -= entry.size
+      this.cache.delete(key)
+      return null
+    }
+
+    entry.hits++
+    return entry.data
+  }
+
+  set(key: string, data: any) {
+    const dataSize = this.estimateSize(data)
+    this.cleanup()
+
+    while ((this.cache.size >= this.maxSize || this.totalSize + dataSize > this.maxTotalSize) && this.cache.size > 0) {
+      const oldestKey = this.cache.keys().next().value
+      if (oldestKey) {
+        const oldEntry = this.cache.get(oldestKey)
+        if (oldEntry) {
+          this.totalSize -= oldEntry.size
+        }
+        this.cache.delete(oldestKey)
+      } else {
+        break
+      }
+    }
+
+    this.cache.set(key, {
+      data,
+      timestamp: Date.now(),
+      size: dataSize,
+      hits: 0,
+    })
+    this.totalSize += dataSize
+  }
+
+  private estimateSize(obj: any): number {
+    return JSON.stringify(obj).length * 2
+  }
+
+  private cleanup() {
+    const now = Date.now()
+    for (const [key, entry] of this.cache.entries()) {
+      if (now - entry.timestamp > this.ttl) {
+        this.totalSize -= entry.size
+        this.cache.delete(key)
+      }
+    }
+  }
+
+  clear() {
+    this.cache.clear()
+    this.totalSize = 0
+  }
+}
+
+import { formCache, countCache } from "@/lib/form-cache"
+
+setInterval(() => {
+  formCache.clear()
+  countCache.clear()
+}, 120000)
+
+function generateCacheKey(params: URLSearchParams, userId: string, role: string): string {
+  const sortedParams = Array.from(params.entries())
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([key, value]) => `${key}=${value}`)
     .join("&")
+
+  return `${userId}:${role}:${sortedParams}`
 }
 
-/**
- * Function to send email notification when a new form is submitted
- * Made non-blocking by not awaiting the result
- */
+function formatManualDatesForEmail(manualDates: string[]): string {
+  if (!manualDates || manualDates.length === 0) return "N/A"
+
+  const sortedDates = [...manualDates].sort((a, b) => new Date(a).getTime() - new Date(b).getTime())
+  return sortedDates.map((date) => format(new Date(date), "dd MMM yyyy")).join(", ")
+}
+
+function getLeaveeDateDisplay(formData: any): string {
+  if (formData.dateSelectionMode === "manual" && formData.manualDates && formData.manualDates.length > 0) {
+    return formatManualDatesForEmail(formData.manualDates)
+  }
+
+  const startDate = formData.startDate ? new Date(formData.startDate).toLocaleDateString() : "N/A"
+  const endDate = formData.endDate ? new Date(formData.endDate).toLocaleDateString() : "N/A"
+  return `${startDate} - ${endDate}`
+}
+
 function sendNewFormNotification(form: any, user: SessionUser) {
-  return new Promise<boolean>(async (resolve) => {
+  setImmediate(async () => {
     try {
-      const formType = form.type === "leave" ? "Leave Request" : "Overtime Request"
+      const formType =
+        form.type === "leave"
+          ? "Leave Request"
+          : form.type === "overtime"
+            ? "Overtime Request"
+            : form.type === "training-request"
+              ? "Training Request"
+              : form.type === "job-requisition"
+                ? "Job Requisition"
+                : form.type.charAt(0).toUpperCase() + form.type.slice(1)
       const formNumber = form.formNumber ? form.formNumber.toString().padStart(4, "0") : form.id
 
       const subject = `New ${formType} Form #${formNumber} Submitted`
 
-      // Format dates for email
       const formatDate = (dateString: string) => {
         return new Date(dateString).toLocaleDateString()
       }
 
-      // Create HTML content for email
+      let supportingDocsHtml = ""
+      const uploadedDocumentFiles: UploadedDocumentFile[] = form.data?.uploadedDocumentFiles || []
+      const supportingDocTypes: string[] = form.data?.supportingDocuments || []
+
+      const emailAttachments: Array<{
+        filename: string
+        content: Buffer
+        contentType: string
+        cid: string
+      }> = []
+
+      if (uploadedDocumentFiles.length > 0) {
+        for (let i = 0; i < uploadedDocumentFiles.length; i++) {
+          const doc = uploadedDocumentFiles[i]
+          if (doc.fileData && doc.fileData.startsWith("data:")) {
+            try {
+              const matches = doc.fileData.match(/^data:([^;]+);base64,(.+)$/)
+              if (matches) {
+                const contentType = matches[1]
+                const base64Data = matches[2]
+                const buffer = Buffer.from(base64Data, "base64")
+                const cid = `doc_${i}_${Date.now()}`
+
+                emailAttachments.push({
+                  filename: doc.fileName || `document_${i + 1}.jpg`,
+                  content: buffer,
+                  contentType: contentType,
+                  cid: cid,
+                })
+              }
+            } catch (err) {
+              console.error(`Failed to process document ${doc.fileName}:`, err)
+            }
+          }
+        }
+      }
+
+      if (uploadedDocumentFiles.length > 0 || supportingDocTypes.length > 0) {
+        supportingDocsHtml = `
+          <div style="background-color: #f0fdf4; border: 1px solid #86efac; border-radius: 5px; padding: 15px; margin: 15px 0;">
+            <h3 style="margin-top: 0; color: #166534;">📎 Supporting Documents</h3>
+        `
+
+        if (supportingDocTypes.length > 0) {
+          supportingDocsHtml += `
+            <p style="margin-bottom: 10px;"><strong>Document Types Required:</strong></p>
+            <ul style="margin: 0; padding-left: 20px;">
+              ${supportingDocTypes.map((docType: string) => `<li>${docType}</li>`).join("")}
+            </ul>
+          `
+        }
+
+        if (uploadedDocumentFiles.length > 0 && emailAttachments.length > 0) {
+          supportingDocsHtml += `
+            <p style="margin-top: 15px; margin-bottom: 10px;"><strong>Uploaded Documents (${emailAttachments.length} file${emailAttachments.length > 1 ? "s" : ""}):</strong></p>
+          `
+
+          for (let i = 0; i < emailAttachments.length; i++) {
+            const attachment = emailAttachments[i]
+            const docInfo = uploadedDocumentFiles[i]
+
+            supportingDocsHtml += `
+              <div style="margin-bottom: 15px; padding: 10px; background-color: white; border: 1px solid #d1d5db; border-radius: 5px;">
+                <p style="margin: 0 0 8px 0; font-weight: bold; color: #0f766e;">📄 ${docInfo?.documentType || "Document"}</p>
+                <p style="margin: 0 0 8px 0; font-size: 12px; color: #6b7280;">File: ${attachment.filename}</p>
+                <img src="cid:${attachment.cid}" alt="${docInfo?.documentType || "Document"}" style="max-width: 100%; max-height: 400px; border: 1px solid #e5e7eb; border-radius: 4px; display: block;" />
+              </div>
+            `
+          }
+
+          supportingDocsHtml += `
+            <p style="margin-top: 10px; font-size: 12px; color: #6b7280; font-style: italic;">
+              💡 Tip: The documents are also attached to this email for easy download.
+            </p>
+          `
+        } else if (uploadedDocumentFiles.length > 0) {
+          supportingDocsHtml += `
+            <p style="margin-top: 15px; margin-bottom: 10px;"><strong>Uploaded Documents:</strong></p>
+            <p style="color: #166534;">✓ ${uploadedDocumentFiles.length} document(s) submitted with this request.</p>
+          `
+        }
+
+        supportingDocsHtml += `</div>`
+      }
+
+      const getLeaveDetailsHtml = () => {
+        if (form.type !== "leave") return ""
+
+        const isManualDates =
+          form.data.dateSelectionMode === "manual" && form.data.manualDates && form.data.manualDates.length > 0
+
+        if (isManualDates) {
+          const sortedDates = [...form.data.manualDates].sort(
+            (a: string, b: string) => new Date(a).getTime() - new Date(b).getTime(),
+          )
+          const formattedDates = sortedDates.map((date: string) => format(new Date(date), "dd MMM yyyy"))
+
+          return `
+            <p><strong>Leave Type:</strong> ${form.data.leaveType}</p>
+            <p><strong>Date Selection:</strong> Non-consecutive (Manual)</p>
+            <p><strong>Selected Dates (${formattedDates.length}):</strong></p>
+            <ul style="margin: 5px 0; padding-left: 20px;">
+              ${formattedDates.map((date: string) => `<li>${date}</li>`).join("")}
+            </ul>
+            <p><strong>Total Days:</strong> ${form.data.totalDays}</p>
+          `
+        }
+
+        return `
+          <p><strong>Leave Type:</strong> ${form.data.leaveType}</p>
+          <p><strong>Date Range:</strong> ${formatDate(form.data.startDate)} - ${formatDate(form.data.endDate)}</p>
+          <p><strong>Total Days:</strong> ${form.data.totalDays}</p>
+        `
+      }
+
       const htmlContent = `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
           <h2 style="color: #0f766e;">New ${formType} Form Submitted</h2>
@@ -86,289 +306,434 @@ function sendNewFormNotification(form: any, user: SessionUser) {
             <h3 style="margin-top: 0;">Form Details:</h3>
             <p><strong>Form Type:</strong> ${formType}</p>
             <p><strong>Form ID:</strong> ${formNumber}</p>
-            <p><strong>Submitted By:</strong> ${user.name || "Employee"} (${user.email || "No email"})</p>
+            <p><strong>Submitted By:</strong> ${
+              Array.isArray(form.data.employees) && form.data.employees.length > 0
+                ? `${form.data.employees[0].name} (${form.data.employees[0].employeeCode ?? ""})`
+                : user.name || "Employee"
+            }</p>
             <p><strong>Submitted On:</strong> ${formatDate(new Date().toISOString())}</p>
             ${
               form.type === "leave"
-                ? `<p><strong>Leave Type:</strong> ${form.data.leaveType}</p>
-                  <p><strong>Date Range:</strong> ${formatDate(form.data.startDate)} - ${formatDate(form.data.endDate)}</p>
-                  <p><strong>Total Days:</strong> ${form.data.totalDays}</p>`
-                : `<p><strong>Date:</strong> ${formatDate(form.data.date)}</p>
-                  <p><strong>Time Range:</strong> ${form.data.startTime} - ${form.data.endTime}</p>`
+                ? getLeaveDetailsHtml()
+                : form.type === "overtime"
+                  ? `<p><strong>Date:</strong> ${formatDate(form.data.date)}</p>
+                    <p><strong>Time Range:</strong> ${form.data.startTime} - ${form.data.endTime}</p>`
+                  : form.type === "training-request"
+                    ? `<p><strong>Training Title:</strong> ${form.data.trainingTitle}</p>
+                      <p><strong>Training Provider:</strong> ${form.data.trainingProvider}</p>
+                      <p><strong>Start Date:</strong> ${formatDate(form.data.startDate)}</p>
+                      <p><strong>End Date:</strong> ${formatDate(form.data.endDate)}</p>`
+                    : form.type === "job-requisition"
+                      ? `<p><strong>Request Position:</strong> ${form.data.jobRequisition.requestPosition}</p>
+                        <p><strong>Department Name:</strong> ${form.data.jobRequisition.departmentName}</p>
+                        <p><strong>Expected Start Date:</strong> ${formatDate(form.data.jobRequisition.expectedStartDate)}</p>`
+                      : `<p><strong>Details:</strong> ${form.data.details}</p>`
             }
             <p><strong>Reason:</strong> ${form.data.reason}</p>
           </div>
+          
+          ${supportingDocsHtml}
           
           <p>Please log in to the system to review and process this request.</p>
           <p>This is an automated notification. Please do not reply to this email.</p>
         </div>
       `
 
-      // Determine recipients based on form type
-      const recipients = []
+      const recipients: string[] = []
 
-      // All forms need HRD approval
-      recipients.push(process.env.HRD_EMAIL || "hrd@example.com")
+      if (form.type === "leave") {
+        const hrdEmail = process.env.HRD_EMAIL
+        if (hrdEmail) {
+          recipients.push(...hrdEmail.split(",").map((email) => email.trim()))
+        }
+      } else if (form.type === "overtime") {
+        const adminEmail = "admn.htmf@gmail.com"
+        const supervisorEmail = process.env.SUPERVISOR_EMAIL || process.env.supervisor_EMAIL
 
-      // Only overtime forms need PMC approval
-      if (form.type === "overtime") {
-        recipients.push(process.env.PMC_EMAIL || "pmc@example.com")
+        recipients.push(adminEmail)
+
+        if (supervisorEmail) {
+          recipients.push(...supervisorEmail.split(",").map((email) => email.trim()))
+        }
+
+        console.log(`📧 Overtime notification will be sent to: ${recipients.join(", ")}`)
+        console.log(`📧 Excluding meliana.htm@gmail.com from overtime notifications as requested`)
+      } else if (form.type === "training-request") {
+        const hrdEmail = process.env.HRD_EMAIL
+        if (hrdEmail) {
+          recipients.push(...hrdEmail.split(",").map((email) => email.trim()))
+        }
+      } else if (form.type === "job-requisition") {
+        const hrdEmail = process.env.HRD_EMAIL
+        if (hrdEmail) {
+          recipients.push(...hrdEmail.split(",").map((email) => email.trim()))
+        }
+      } else {
+        const hrdEmail = process.env.HRD_EMAIL
+        if (hrdEmail) {
+          recipients.push(...hrdEmail.split(",").map((email) => email.trim()))
+        }
       }
 
-      // If the user is not a leader, notify leaders
-      if (user.role !== "leader") {
-        // In a real implementation, you would fetch leader emails from the database
-        // For now, we'll just use HRD as a fallback
-        // recipients.push("leader@example.com")
-      }
-
-      // Remove duplicates
       const uniqueRecipients = [...new Set(recipients)]
 
-      // Use Promise.all to send emails in parallel instead of sequentially
-      const emailPromises = uniqueRecipients.map((recipient) =>
-        sendMail({
-          to: recipient,
-          subject,
-          html: htmlContent,
-        }),
-      )
+      if (uniqueRecipients.length > 0) {
+        const emailPromises = uniqueRecipients.map((recipient) =>
+          sendMail({
+            to: recipient,
+            subject,
+            html: htmlContent,
+            attachments: emailAttachments.length > 0 ? emailAttachments : undefined,
+          }),
+        )
 
-      await Promise.all(emailPromises)
+        await Promise.all(emailPromises)
+        console.log(`✅ New form notification emails sent to ${uniqueRecipients.join(", ")}`)
 
-      console.log(`New form notification emails sent to ${uniqueRecipients.join(", ")}`)
-      resolve(true)
+        if (emailAttachments.length > 0) {
+          console.log(
+            `📎 Email included ${emailAttachments.length} supporting document(s) as embedded images and attachments`,
+          )
+        }
+      } else {
+        console.warn("⚠️ No email recipients configured for form notifications")
+      }
     } catch (error) {
-      console.error("Error sending new form notification emails:", error)
-      resolve(false)
+      console.error("❌ Error sending new form notification emails:", error)
     }
   })
 }
 
-/**
- * Fungsi untuk mendapatkan nomor form berikutnya secara berurutan
- * Memastikan nomor form melanjutkan dari nomor terakhir yang ada di database
- */
-async function getNextFormNumber(tx: any) {
+async function getNextFormNumber(): Promise<number> {
   try {
-    // Cari form dengan nomor tertinggi menggunakan query yang lebih robust
-    // Menggunakan raw SQL untuk memastikan kita mendapatkan nilai numerik yang benar
-    const highestFormResult = await tx.$queryRaw<{ max_form_number: number | null }[]>`
-      SELECT COALESCE(MAX("formNumber"), 0) as max_form_number FROM "Form"
-    `
+    const maxRetries = 3
+    let attempt = 0
 
-    // Pastikan kita mendapatkan nilai yang valid
-    let maxFormNumber = highestFormResult[0]?.max_form_number
+    while (attempt < maxRetries) {
+      try {
+        const result = await prisma.$queryRaw<{ max_form_number: number | null }[]>`
+          SELECT COALESCE(MAX("formNumber"), 0) as max_form_number FROM "Form"
+        `
 
-    // Jika null atau undefined, gunakan 0
-    if (maxFormNumber === null || maxFormNumber === undefined) {
-      maxFormNumber = 0
+        let maxFormNumber = result[0]?.max_form_number || 0
+        maxFormNumber = Number(maxFormNumber)
+
+        if (isNaN(maxFormNumber)) {
+          maxFormNumber = 0
+        }
+
+        const nextFormNumber = maxFormNumber + 1
+        console.log(`Next form number: ${nextFormNumber} (attempt ${attempt + 1})`)
+
+        return nextFormNumber
+      } catch (error) {
+        attempt++
+        if (attempt >= maxRetries) throw error
+        await new Promise((resolve) => setTimeout(resolve, 100 * attempt))
+      }
     }
 
-    // Pastikan maxFormNumber adalah angka
-    maxFormNumber = Number(maxFormNumber)
-
-    // Jika bukan angka yang valid, gunakan 0
-    if (isNaN(maxFormNumber)) {
-      maxFormNumber = 0
-    }
-
-    // Tambahkan 1 untuk mendapatkan nomor berikutnya
-    const nextFormNumber = maxFormNumber + 1
-
-    console.log(`Next form number: ${nextFormNumber} (based on max: ${maxFormNumber})`)
-
-    return nextFormNumber
+    throw new Error("Failed to generate form number after retries")
   } catch (error) {
     console.error("Error getting next form number:", error)
     throw new Error("Failed to generate form number")
   }
 }
 
-/**
- * Fungsi untuk memverifikasi bahwa nomor form belum digunakan
- */
-async function verifyFormNumberUnique(tx: any, formNumber: number): Promise<boolean> {
-  const existingForm = await tx.form.findFirst({
-    where: { formNumber },
-    select: { id: true },
-  })
-
-  return existingForm === null
-}
-
-// Update the POST function to ensure it always returns a valid JSON response
 export async function POST(request: Request) {
-  const session = (await getServerSession(authOptions)) as CustomSession | null
-
-  if (!session) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
-  }
-
   try {
-    const data = await request.json()
+    // =========================
+    // AUTH (FIXED)
+    // =========================
+    const session = await getServerSession(authOptions)
 
-    // Parse the total days as a number for leave forms
-    let jumlahHari = 0
-    if (data.type === "leave") {
-      jumlahHari = data.jumlahHariCuti || Number.parseInt(data.formData.totalDays) || 0
-
-      // Add jumlahHari to the form data for easier access later
-      data.formData.jumlahHari = jumlahHari
+    if (!session?.user?.email) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
     }
 
-    // Implementasi retry logic untuk menangani race condition
-    let retries = 0
-    const maxRetries = 3
-    let lastError: Error | null = null
-    let createdForm: any = null
+    const user = await prisma.user.findUnique({
+      where: { email: session.user.email },
+    })
 
-    while (retries < maxRetries) {
-      try {
-        // Use a transaction to handle form creation and avoid race conditions with formNumber
-        const result = await prisma.$transaction(
-          async (tx) => {
-            // Dapatkan nomor form berikutnya
-            let nextFormNumber = await getNextFormNumber(tx)
+    if (!user) {
+      return NextResponse.json({ error: "Authenticated user not found in database" }, { status: 401 })
+    }
 
-            // Verifikasi bahwa nomor form belum digunakan
-            let isUnique = await verifyFormNumberUnique(tx, nextFormNumber)
+    // =========================
+    // REQUEST BODY
+    // =========================
+    const data = await request.json()
+    const formData = data.formData || data.data || {}
 
-            // Jika nomor sudah digunakan, cari nomor berikutnya yang tersedia
-            while (!isUnique) {
-              console.log(`Form number ${nextFormNumber} already exists, trying next number`)
-              nextFormNumber++
-              isUnique = await verifyFormNumberUnique(tx, nextFormNumber)
-            }
+    console.log("[v0] Received form data:", {
+      type: data.type,
+      hasFormData: !!data.formData,
+      hasData: !!data.data,
+      formDataKeys: Object.keys(formData),
+      hasSupportingDocs: !!formData.supportingDocuments,
+      hasUploadedDocs: !!formData.uploadedDocumentFiles,
+      uploadedDocsCount: formData.uploadedDocumentFiles?.length || 0,
+      dateSelectionMode: formData.dateSelectionMode,
+      manualDatesCount: formData.manualDates?.length || 0,
+    })
 
-            console.log(`Using form number: ${nextFormNumber}`)
+    if (!formData || Object.keys(formData).length === 0) {
+      console.log("[v0] Form data validation failed:", {
+        formData,
+        dataKeys: Object.keys(data),
+      })
+      return NextResponse.json({ error: "Form data is required" }, { status: 400 })
+    }
 
-            // Make sure the userId is included in the form data
-            if (data.type === "leave" && data.formData) {
-              data.formData.userId = session.user.id
-            }
+    // =========================
+    // EMPLOYEE LOOKUP (FIXED)
+    // =========================
+    let employee = await prisma.employee.findUnique({
+      where: { userId: user.id },
+    })
 
-            // Create approvals array based on form type and user role
-            const approvals = []
+    // (lanjutkan kode lu setelah ini tanpa diubah)
 
-            if (session.user.role === "leader") {
-              // Leaders auto-approve their own forms
-              approvals.push({
-                role: "leader",
-                status: "approved",
-                approverId: session.user.id,
-                signature: data.signature,
-              })
-            } else {
-              // Regular employees need leader approval
-              approvals.push({
-                role: "leader",
-                status: "pending",
-              })
-            }
+    /* =================================================
+   ENSURE EMPLOYEE EXISTS (DECLARE ONCE)
+================================================= */
+    employee = await prisma.employee.findUnique({
+      where: { userId: session.user.id },
+    })
 
-            // All forms need HRD approval
-            approvals.push({
-              role: "hrd",
-              status: "pending",
-            })
+    if (!employee) {
+      const employeeCount = await prisma.employee.count()
+      const employeeCode = `EMP${String(employeeCount + 1).padStart(4, "0")}`
 
-            // Only add PMC approval for overtime forms
-            if (data.type === "overtime") {
-              approvals.push({
-                role: "pmc",
-                status: "pending",
-              })
-            }
+      employee = await prisma.employee.create({
+        data: {
+          userId: session.user.id,
+          employeeCode,
+          name: user.name ?? "Unknown",
+          department: user.department ?? "Unknown",
+          position: user.position ?? "Unknown",
+          isActive: true,
+        },
+      })
 
-            // Create the form with transaction
-            const form = await tx.form.create({
-              data: {
-                formNumber: nextFormNumber,
-                type: data.type,
-                status: "pending",
-                data: data.formData,
-                employeeId: session.user.id,
-                employeeSignature: data.signature,
-                supportingDocuments: data.supportingDocuments || [],
-                approvals: {
-                  create: approvals,
-                },
-              },
-            })
+      console.log(`✅ Created Employee ${employee.employeeCode} for user ${session.user.id}`)
+    }
 
-            // Invalidate cache after creating a new form
-            formCache.clear()
-            countCache.clear()
+    /* =================================================
+   LEAVE CALCULATION
+================================================= */
+    if (data.type === "leave") {
+      const jumlahHari = data.jumlahHariCuti || Number.parseInt(formData?.totalDays || "0") || 0
 
-            return { form }
+      formData.jumlahHari = jumlahHari
+    }
+
+    /* =================================================
+   FORM NUMBER
+================================================= */
+    const nextFormNumber = await getNextFormNumber()
+
+    /* =================================================
+   FORM STATUS (APPROVAL-BASED)
+================================================= */
+    const initialStatus = "PENDING"
+
+    /* =================================================
+   APPROVAL SETUP (SINGLE SOURCE OF TRUTH)
+================================================= */
+    const approvals: {
+      role: string
+      status: string
+      approverId?: string
+      signature?: string | null
+      comments?: string
+    }[] = []
+
+    // ✅ LEADER AUTO-APPROVED SAAT SUBMIT
+    approvals.push({
+      role: "LEADER",
+      status: "APPROVED",
+      approverId: session.user.id,
+      signature: data.signature ?? null,
+      comments: "Auto-approved on submission",
+    })
+
+    // ✅ HRD MENUNGGU APPROVAL
+    approvals.push({
+      role: "HRD",
+      status: "PENDING",
+    })
+
+    let form
+
+    if (data.type === "training-request") {
+      form = await prisma.form.create({
+        data: {
+          formNumber: nextFormNumber,
+          type: data.type,
+          status: initialStatus,
+          data: {
+            ...formData,
+            trainingRequest: {
+              fullName: formData.fullName || "",
+              departmentName: formData.departmentName || "",
+              position: formData.position || "",
+              contactInfo: formData.contactInfo || "",
+              trainingTitle: formData.trainingTitle || "",
+              trainingProvider: formData.trainingProvider || "",
+              startDate: formData.startDate ? new Date(formData.startDate) : null,
+              endDate: formData.endDate ? new Date(formData.endDate) : null,
+              trainingLocation: formData.trainingLocation || "",
+              trainingMode: mapTrainingMode(formData.trainingMode || "inPerson"),
+              trainingDuration: formData.trainingDuration || "",
+              accommodationRequired: formData.accommodationRequired || false,
+              checkInDate: formData.checkInDate ? new Date(formData.checkInDate) : null,
+              nights: formData.nights ? Number.parseInt(formData.nights) : null,
+              preferredAccommodation: formData.preferredAccommodation || "",
+              trainingObjectives: formData.trainingObjectives || "",
+              employeeCategory: mapEmployeeCategory(formData.employeeCategory || "staff"),
+              supervisorName: formData.supervisorName || "",
+              managerName: formData.managerName || "",
+              hrStatus: "pending",
+              hrComments: "",
+            },
+            leaderSignature: data.signature,
+            leaderApprovalDate: new Date().toISOString(),
           },
-          {
-            timeout: 10000,
-            isolationLevel: "Serializable", // Use serializable isolation level to prevent race conditions
+          employee: { connect: { id: employee.id } },
+          createdBy: { connect: { id: session.user.id } },
+          supportingDocuments: data.supportingDocuments || [],
+          approvals: {
+            create: approvals,
           },
-        )
+        },
+        select: {
+          id: true,
+          formNumber: true,
+          type: true,
+          data: true,
+        },
+      })
+    } else if (data.type === "job-requisition") {
+      if (!formData.requestPosition) {
+        return NextResponse.json({ error: "Request position is required for job requisition" }, { status: 400 })
+      }
 
-        // Store the created form for email notification
-        createdForm = result.form
+      form = await prisma.form.create({
+        data: {
+          formNumber: nextFormNumber,
+          type: data.type,
+          status: initialStatus,
+          data: {
+            ...formData,
+            jobRequisition: {
+              requestPosition: formData.requestPosition || "",
+              departmentName: formData.departmentName || "",
+              expectedStartDate: formData.expectedStartDate ? new Date(formData.expectedStartDate) : null,
+              skillsRequired: formData.skillsRequired || "",
+              explanation: formData.explanation || formData.briefExplanation || "",
+              positionDuration: formData.positionDuration === "permanent" ? "PERMANENT" : "TEMPORARY",
+              endDate: formData.temporaryEndDate ? new Date(formData.temporaryEndDate) : null,
+              employmentType:
+                formData.employmentStatus === "partTime"
+                  ? "PART_TIME"
+                  : formData.employmentStatus === "contract"
+                    ? "CONTRACT"
+                    : "FULL_TIME",
+              salaryRange: formData.salaryRange || "",
+              budgetStatus: formData.budgetStatus === "additional" ? "REQUIRES_ADDITIONAL" : "SUFFICIENT",
+              remarks: formData.remarks || formData.hrRemarks || "",
+            },
+            leaderSignature: data.signature,
+            leaderApprovalDate: new Date().toISOString(),
+          },
+          employee: { connect: { id: employee.id } },
+          createdBy: { connect: { id: session.user.id } },
+          supportingDocuments: data.supportingDocuments || [],
+          approvals: {
+            create: approvals,
+          },
+        },
+        select: {
+          id: true,
+          formNumber: true,
+          type: true,
+          data: true,
+        },
+      })
+    } else {
+      form = await prisma.form.create({
+        data: {
+          formNumber: nextFormNumber,
+          type: data.type,
+          status: initialStatus,
+          data: {
+            ...formData,
+            leaderSignature: data.signature,
+            leaderApprovalDate: new Date().toISOString(),
+          },
+          employee: { connect: { id: employee.id } },
+          createdBy: { connect: { id: session.user.id } },
+          supportingDocuments: data.supportingDocuments || [],
+          approvals: {
+            create: approvals,
+          },
+        },
+        select: {
+          id: true,
+          formNumber: true,
+          type: true,
+          data: true,
+        },
+      })
+    }
 
-        // Jika berhasil, kembalikan respons sukses
-        return NextResponse.json({
-          success: true,
-          formId: result.form.id,
-          formNumber: result.form.formNumber,
-        })
-      } catch (error) {
-        console.log(`Attempt ${retries + 1} failed:`, error)
-        lastError = error instanceof Error ? error : new Error(String(error))
+    formCache.clear()
+    countCache.clear()
 
-        // Cek apakah error adalah P2002 (unique constraint violation)
-        const isPrismaUniqueConstraintError =
-          error instanceof Error && "code" in (error as any) && (error as any).code === "P2002"
+    if (data.type === "leave") {
+      const hrdUsers = await prisma.user.findMany({
+        where: { role: "HRD" },
+        select: { id: true },
+      })
 
-        if (isPrismaUniqueConstraintError) {
-          retries++
+      if (hrdUsers.length > 0) {
+        const formType = data.type === "leave" ? "Leave Request" : "Overtime Request"
+        const formNumber = form.formNumber ? form.formNumber.toString().padStart(4, "0") : form.id
 
-          if (retries >= maxRetries) {
-            console.log(`Max retries (${maxRetries}) reached. Giving up.`)
-            break
-          }
+        const notificationData = hrdUsers.map((hrdUser) => ({
+          title: `New ${formType} #${formNumber}`,
+          message: `${session.user.name || "Employee"} submitted a ${formType.toLowerCase()} requiring approval`,
+          userId: hrdUser.id,
+          isRead: false,
+        }))
 
-          // Tunggu sebentar sebelum mencoba lagi (exponential backoff)
-          const delay = 100 * Math.pow(2, retries)
-          console.log(`Waiting ${delay}ms before retry ${retries + 1}...`)
-          await new Promise((resolve) => setTimeout(resolve, delay))
+        const notificationClient = (prisma as any)?.notification
+        if (notificationClient?.createMany) {
+          await notificationClient.createMany({
+            data: notificationData,
+          })
+          console.log(`📧 Created ${notificationData.length} notifications for HRD users`)
         } else {
-          // Jika bukan error unique constraint, lempar error langsung
-          throw error
+          console.warn("[v0] Prisma model 'notification' not found; skipping DB notifications")
         }
       }
     }
 
-    // Send email notification after successful form creation
-    // Make it non-blocking by not awaiting the result
-    if (createdForm) {
-      // Fire and forget - don't await
-      sendNewFormNotification(createdForm, session.user)
-        .then(() => console.log("New form notification sent successfully"))
-        .catch((err) => console.error("Failed to send new form notification:", err))
-    }
+    sendNewFormNotification(form, session.user)
 
-    // Jika semua retry gagal
-    if (lastError) {
-      throw lastError
-    }
-
-    throw new Error("Failed to create form after multiple attempts")
+    return NextResponse.json({
+      success: true,
+      formId: form.id,
+      formNumber: form.formNumber,
+    })
   } catch (error) {
     console.error("Error creating form:", error)
-    // Ensure we return a proper error object with a message
     const errorMessage = error instanceof Error ? error.message : "Failed to create form"
     return NextResponse.json({ error: errorMessage }, { status: 500 })
   }
 }
 
-// Update the GET function to handle the export requests properly
 export async function GET(request: Request) {
   const startTime = Date.now()
   const session = (await getServerSession(authOptions)) as CustomSession | null
@@ -376,6 +741,8 @@ export async function GET(request: Request) {
   if (!session) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
+
+  const role = session.user.role?.toUpperCase()
 
   const { searchParams } = new URL(request.url)
   const format = searchParams.get("format")
@@ -397,36 +764,39 @@ export async function GET(request: Request) {
 
   const page = Number.parseInt(searchParams.get("page") || "1", 10)
   const limit = Number.parseInt(searchParams.get("limit") || "10", 10)
+  const cursor = searchParams.get("cursor")
 
-  // Ensure valid pagination values
   const validPage = page > 0 ? page : 1
   const validLimit = limit > 0 && limit <= 100 ? limit : 10
-  const skip = (validPage - 1) * validLimit
 
   try {
     const whereClause: any = {}
 
-    // Filter by user role
-    if (session.user.role !== "admin" && session.user.role !== "hrd" && session.user.role !== "pmc") {
-      whereClause.employeeId = session.user.id
+    if (!["ADMIN", "HRD", "SUPERVISOR", "LEADER"].includes(session.user.role)) {
+      const employee = await prisma.employee.findUnique({
+        where: { userId: session.user.id },
+        select: { id: true },
+      })
+
+      if (!employee) {
+        return NextResponse.json({ data: [], pagination: null })
+      }
+
+      whereClause.employeeId = employee.id
     }
 
-    // For PMC users, only show overtime forms
-    if (session.user.role === "pmc") {
+    if (role === "SUPERVISOR") {
       whereClause.type = "overtime"
     }
 
-    // Filter by status if provided
-    if (status) {
-      whereClause.status = status
-    }
+    if (typeof status === "string" && status.toLowerCase() !== "all") {
+  whereClause.status = status.toUpperCase()
+}
 
-    // Filter by type if provided
     if (type && type !== "all") {
       whereClause.type = type
     }
 
-    // Add date range filtering
     if (selectedMonth) {
       const startDate = new Date(selectedMonth.year, selectedMonth.month, 1)
       const endDate = new Date(selectedMonth.year, selectedMonth.month + 1, 0)
@@ -452,7 +822,6 @@ export async function GET(request: Request) {
       }
     }
 
-    // Add department filtering
     const department = searchParams.get("department")
     if (department && department !== "all") {
       whereClause.employee = {
@@ -460,26 +829,31 @@ export async function GET(request: Request) {
       }
     }
 
-    // Generate cache key based on query parameters
-    const cacheKey = generateCacheKey(searchParams)
+    const cacheKey = generateCacheKey(searchParams, session.user.id, role || "UNKNOWN")
 
-    // For export requests, always fetch all data without pagination
     if (format) {
-      // Fetch all forms that match the criteria without pagination
       const forms = await prisma.form.findMany({
         where: whereClause,
-        include: {
+        select: {
+          id: true,
+          type: true,
+          status: true,
+          data: true,
+          createdAt: true,
+          formNumber: true,
           employee: {
             select: {
               id: true,
               name: true,
-              employeeId: true,
               department: true,
               position: true,
             },
           },
           approvals: {
-            include: {
+            select: {
+              id: true,
+              role: true,
+              status: true,
               approver: {
                 select: {
                   id: true,
@@ -493,124 +867,128 @@ export async function GET(request: Request) {
         orderBy: {
           createdAt: "desc",
         },
+        take: 5000,
       })
 
       return handleExport(forms, format, selectedMonth)
     }
 
-    // Check if we have cached data
     const cacheEntry = formCache.get(cacheKey)
-    if (cacheEntry && Date.now() - cacheEntry.timestamp < CACHE_TTL) {
-      console.log(`Cache hit for key: ${cacheKey}, age: ${Date.now() - cacheEntry.timestamp}ms`)
-
-      // If format is specified, handle export with cached data
-      if (format) {
-        return handleExport(cacheEntry.data, format, selectedMonth)
-      }
-
-      // For stats endpoint, return cached data
-      if (isStatsRequest) {
-        return NextResponse.json(cacheEntry.data)
-      }
-
-      // Return cached paginated data
-      return NextResponse.json(cacheEntry.data)
+    if (cacheEntry) {
+      console.log(`✅ Cache hit for key: ${cacheKey}`)
+      return NextResponse.json(cacheEntry)
     }
 
-    console.log(`Cache miss for key: ${cacheKey}`)
+    console.log(`🚫 Cache miss for key: ${cacheKey}`)
 
-    // Optimize the include statement based on what's needed
-    const includeClause = {
+    const baseSelect = {
+      id: true,
+      formNumber: true,
+      type: true,
+      status: true,
+      data: true,
+      createdAt: true,
+      updatedAt: true,
+      employeeId: true,
       employee: {
         select: {
           id: true,
           name: true,
-          employeeId: true,
+          employeeCode: true,
           department: true,
           position: true,
         },
       },
-      // Only include approvals if needed (not for basic listing)
-      ...(isStatsRequest || format || getAllForms
-        ? {
-            approvals: {
-              include: {
-                approver: {
-                  select: {
-                    id: true,
-                    name: true,
-                    role: true,
-                  },
-                },
+    }
+
+    const includeApprovals = Boolean(searchParams.get("includeApprovals"))
+    const selectClause = {
+      ...baseSelect,
+      ...(includeApprovals && {
+        approvals: {
+          select: {
+            id: true,
+            role: true,
+            status: true,
+            approver: {
+              select: {
+                id: true,
+                name: true,
+                role: true,
               },
             },
-          }
-        : {}),
+          },
+        },
+      }),
     }
 
-    // Check if we have a cached count for this query
-    const countCacheKey = `count:${JSON.stringify(whereClause)}`
-    let totalCount
-    const countCacheEntry = countCache.get(countCacheKey)
+    let paginationOptions: any = {
+      orderBy: {
+        createdAt: "desc",
+      },
+    }
 
-    // Use transaction to combine multiple database operations
-    const result = await prisma.$transaction(async (tx) => {
-      // Get count if needed and not cached
-      let count = 0
-      if (!getAllForms && (!countCacheEntry || Date.now() - countCacheEntry.timestamp >= CACHE_TTL)) {
-        count = await tx.form.count({
-          where: whereClause,
-        })
-
-        // Cache the count
-        countCache.set(countCacheKey, {
-          count,
-          timestamp: Date.now(),
-        })
-      } else if (!getAllForms) {
-        count = countCacheEntry.count
-      }
-
-      // Fetch forms based on the query parameters with optimized select
-      const forms = await tx.form.findMany({
-        where: whereClause,
-        include: includeClause,
-        orderBy: {
-          createdAt: "desc",
+    if (getAllForms) {
+      paginationOptions.take = 1000
+    } else if (cursor) {
+      paginationOptions = {
+        ...paginationOptions,
+        cursor: {
+          id: cursor,
         },
-        ...(getAllForms ? {} : { skip, take: validLimit }),
-      })
+        skip: 1,
+        take: validLimit,
+      }
+    } else {
+      const skip = (validPage - 1) * validLimit
+      paginationOptions = {
+        ...paginationOptions,
+        skip: skip,
+        take: validLimit,
+      }
+    }
 
-      return { forms, count }
+    let totalCount = 0
+    if (!getAllForms) {
+      const countCacheKey = `count:${cacheKey}`
+      const cachedCount = countCache.get(countCacheKey)
+
+      if (cachedCount !== null) {
+        totalCount = cachedCount
+      } else {
+        if (Object.keys(whereClause).length === 0) {
+          try {
+            const result = await prisma.$queryRaw<{ estimated_count: number }[]>`
+              SELECT reltuples::bigint AS estimated_count
+              FROM pg_class
+              WHERE relname = 'Form'
+            `
+            totalCount = Number(result[0]?.estimated_count) || 0
+          } catch {
+            totalCount = await prisma.form.count({ where: whereClause })
+          }
+        } else {
+          totalCount = await prisma.form.count({ where: whereClause })
+        }
+
+        countCache.set(countCacheKey, totalCount)
+      }
+    }
+
+    const forms = await prisma.form.findMany({
+      where: whereClause,
+      select: selectClause,
+      ...paginationOptions,
     })
 
-    const { forms, count } = result
-    totalCount = count
-
-    // If format is specified, handle export
-    if (format) {
-      // Cache the raw forms data
-      formCache.set(cacheKey, {
-        data: forms,
-        timestamp: Date.now(),
-      })
-      return handleExport(forms, format, selectedMonth)
-    }
-
-    // For stats endpoint, return all forms
     if (isStatsRequest) {
-      // Cache the data
-      formCache.set(cacheKey, {
-        data: forms,
-        timestamp: Date.now(),
-      })
+      formCache.set(cacheKey, forms)
       return NextResponse.json(forms)
     }
 
-    // Otherwise, return paginated data
     if (!getAllForms) {
-      // Calculate pagination metadata
       const totalPages = Math.ceil(totalCount / validLimit)
+      const lastForm = forms[forms.length - 1]
 
       const responseData = {
         data: forms,
@@ -621,38 +999,30 @@ export async function GET(request: Request) {
           totalPages: totalPages,
           hasNextPage: validPage < totalPages,
           hasPrevPage: validPage > 1,
+          nextCursor: lastForm?.id || null,
         },
       }
 
-      // Cache the response
-      formCache.set(cacheKey, {
-        data: responseData,
-        timestamp: Date.now(),
-      })
+      formCache.set(cacheKey, responseData)
 
       const endTime = Date.now()
-      console.log(`Request processed in ${endTime - startTime}ms`)
+      console.log(`✅ Request processed in ${endTime - startTime}ms`)
 
       return NextResponse.json(responseData)
     }
 
-    // Return all forms for statistics
-    formCache.set(cacheKey, {
-      data: forms,
-      timestamp: Date.now(),
-    })
+    formCache.set(cacheKey, forms)
 
     const endTime = Date.now()
-    console.log(`Request processed in ${endTime - startTime}ms`)
+    console.log(`✅ Request processed in ${endTime - startTime}ms`)
 
     return NextResponse.json(forms)
   } catch (error) {
-    console.error("Error fetching forms:", error)
+    console.error("❌ Error fetching forms:", error)
     return NextResponse.json({ error: "Failed to fetch forms" }, { status: 500 })
   }
 }
 
-// DELETE function to handle form deletion
 export async function DELETE(request: Request) {
   const session = (await getServerSession(authOptions)) as CustomSession | null
 
@@ -660,8 +1030,7 @@ export async function DELETE(request: Request) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 
-  // Only allow HRD, admin, or the form owner to delete forms
-  if (session.user.role !== "admin" && session.user.role !== "hrd") {
+  if (session.user.role !== "ADMIN" && session.user.role !== "HRD") {
     return NextResponse.json({ error: "Insufficient permissions to delete forms" }, { status: 403 })
   }
 
@@ -673,7 +1042,6 @@ export async function DELETE(request: Request) {
       return NextResponse.json({ error: "Form ID is required" }, { status: 400 })
     }
 
-    // Check if form exists and get form details for verification
     const existingForm = await prisma.form.findUnique({
       where: { id: formId },
       select: {
@@ -685,7 +1053,6 @@ export async function DELETE(request: Request) {
         employee: {
           select: {
             name: true,
-            email: true,
           },
         },
       },
@@ -695,78 +1062,22 @@ export async function DELETE(request: Request) {
       return NextResponse.json({ error: "Form not found" }, { status: 404 })
     }
 
-    // Additional permission check: only HRD and admin can delete any form
-    // Regular users cannot delete forms (even their own) for audit trail purposes
-    if (session.user.role !== "admin" && session.user.role !== "hrd") {
-      return NextResponse.json(
-        {
-          error: "Only HRD and administrators can delete forms",
-        },
-        { status: 403 },
-      )
-    }
-
-    // Use transaction to ensure data consistency
     await prisma.$transaction(async (tx) => {
-      // Delete related approvals first (cascade delete)
       await tx.approval.deleteMany({
         where: { formId: formId },
       })
 
-      // Delete any related notifications or audit logs if they exist
-      // await tx.notification.deleteMany({
-      //   where: { formId: formId },
-      // })
-
-      // Delete the form
       await tx.form.delete({
         where: { id: formId },
       })
     })
 
-    // Clear cache after deletion to ensure fresh data
     formCache.clear()
     countCache.clear()
 
-    // Log the deletion for audit purposes
     console.log(
-      `Form ${formId} (Form #${existingForm.formNumber}) deleted successfully by user ${session.user.id} (${session.user.name})`,
+      `✅ Form ${formId} (Form #${existingForm.formNumber}) deleted successfully by user ${session.user.id} (${session.user.name})`,
     )
-    console.log(
-      `Deleted form details: Type: ${existingForm.type}, Status: ${existingForm.status}, Employee: ${existingForm.employee?.name}`,
-    )
-
-    // Send notification email about form deletion (optional)
-    try {
-      if (existingForm.employee?.email) {
-        const formType = existingForm.type === "leave" ? "Leave Request" : "Overtime Request"
-        const formNumber = existingForm.formNumber ? existingForm.formNumber.toString().padStart(4, "0") : formId
-
-        await sendMail({
-          to: existingForm.employee.email,
-          subject: `${formType} Form #${formNumber} Has Been Deleted`,
-          html: `
-            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-              <h2 style="color: #dc2626;">Form Deletion Notification</h2>
-              <p>Dear ${existingForm.employee.name},</p>
-              <p>Your ${formType.toLowerCase()} form #${formNumber} has been deleted from the system.</p>
-              <div style="background-color: #fef2f2; border: 1px solid #fecaca; border-radius: 5px; padding: 15px; margin: 15px 0;">
-                <p><strong>Form Type:</strong> ${formType}</p>
-                <p><strong>Form Number:</strong> ${formNumber}</p>
-                <p><strong>Status at Deletion:</strong> ${existingForm.status.charAt(0).toUpperCase() + existingForm.status.slice(1)}</p>
-                <p><strong>Deleted On:</strong> ${new Date().toLocaleDateString()}</p>
-                <p><strong>Deleted By:</strong> ${session.user.name} (${session.user.role.toUpperCase()})</p>
-              </div>
-              <p>If you have any questions about this deletion, please contact the HR department.</p>
-              <p>This is an automated notification. Please do not reply to this email.</p>
-            </div>
-          `,
-        })
-      }
-    } catch (emailError) {
-      console.error("Failed to send deletion notification email:", emailError)
-      // Don't fail the deletion if email fails
-    }
 
     return NextResponse.json({
       success: true,
@@ -779,9 +1090,8 @@ export async function DELETE(request: Request) {
       },
     })
   } catch (error) {
-    console.error("Error deleting form:", error)
+    console.error("❌ Error deleting form:", error)
 
-    // Handle specific Prisma errors
     if (error instanceof Error && "code" in (error as any)) {
       const prismaError = error as any
       if (prismaError.code === "P2025") {
@@ -806,7 +1116,7 @@ export async function DELETE(request: Request) {
   }
 }
 
-// Helper function to get date ranges for predefined time filters
+// Helper functions
 function getTimeFilterDates(filter: string) {
   const now = new Date()
   let start: Date
@@ -833,82 +1143,46 @@ function getTimeFilterDates(filter: string) {
   return { start, end }
 }
 
-// Helper function to get employee info from form
 function getEmployeeInfoFromForm(form: any) {
-  // First check if there's employee information in form.data.employees array
-  if (form.data && form.data.employees && form.data.employees.length > 0) {
+  if (form.data && form.data.employees && Array.isArray(form.data.employees) && form.data.employees.length > 0) {
     return {
       name: form.data.employees[0].name || "",
-      employeeId: form.data.employees[0].employeeId || form.data.employees[0].id || "",
+      employeeCode: form.data.employees[0].employeeCode || form.data.employees[0].id || "",
       department: form.data.employees[0].department || "",
       position: form.data.employees[0].position || "",
     }
   }
 
-  // Then check if there's employee information in form.data
   if (form.data && form.data.employee) {
     return {
       name: form.data.employee.name || "",
-      employeeId: form.data.employee.employeeId || form.data.employee.id || "",
+      employeeCode: form.data.employee.employeeCode || form.data.employee.id || "",
       department: form.data.employee.department || "",
       position: form.data.employee.position || "",
     }
   }
 
-  // Next check if there are direct employee fields in form.data
   if (form.data) {
     const employeeData = {
       name: form.data.employeeName || form.data.name || "",
-      employeeId: form.data.employeeId || form.data.id || "",
+      employeeCode: form.data.employeeCode || form.data.id || "",
       department: form.data.department || "",
       position: form.data.position || "",
     }
 
-    // If at least one field is populated, return this data
-    if (employeeData.name || employeeData.employeeId || employeeData.department || employeeData.position) {
+    if (employeeData.name || employeeData.employeeCode || employeeData.department || employeeData.position) {
       return employeeData
     }
   }
 
-  // As a last resort, return the form.employee data or an empty object if it doesn't exist
-  return form.employee || { name: "", employeeId: "", department: "", position: "" }
+  return form.employee || { name: "", employeeCode: "", department: "", position: "" }
 }
 
-// Helper function to filter forms by time range
-function filterFormsByTimeRange(
-  forms: any[],
-  timeFilter: string | null,
-  selectedMonth: { month: number; year: number } | null,
-) {
-  if (!Array.isArray(forms)) return []
-
-  // If month is selected, filter by that month
-  if (selectedMonth) {
-    return forms.filter((form) => {
-      const formDate = new Date(form.createdAt)
-      return formDate.getMonth() === selectedMonth.month && formDate.getFullYear() === selectedMonth.year
-    })
-  }
-
-  // Otherwise use the time filter
-  if (!timeFilter || timeFilter === "all") return forms
-
-  const { start, end } = getTimeFilterDates(timeFilter)
-
-  return forms.filter((form) => {
-    const formDate = new Date(form.createdAt)
-    return formDate >= start && formDate <= end
-  })
-}
-
-// Helper function to handle exports
 async function handleExport(forms: any[], format: string, selectedMonth: { month: number; year: number } | null) {
   try {
-    // If forms is empty or not an array, fetch all forms based on filters
     if (!Array.isArray(forms) || forms.length === 0) {
       const whereClause: any = {}
 
-      // Apply date filtering if selectedMonth is provided
       if (selectedMonth) {
         const startDate = new Date(selectedMonth.year, selectedMonth.month, 1)
         const endDate = new Date(selectedMonth.year, selectedMonth.month + 1, 0)
@@ -918,21 +1192,28 @@ async function handleExport(forms: any[], format: string, selectedMonth: { month
         }
       }
 
-      // Fetch all forms that match the criteria without pagination
       forms = await prisma.form.findMany({
         where: whereClause,
-        include: {
+        select: {
+          id: true,
+          type: true,
+          status: true,
+          data: true,
+          createdAt: true,
+          formNumber: true,
           employee: {
             select: {
               id: true,
               name: true,
-              employeeId: true,
               department: true,
               position: true,
             },
           },
           approvals: {
-            include: {
+            select: {
+              id: true,
+              role: true,
+              status: true,
               approver: {
                 select: {
                   id: true,
@@ -946,40 +1227,79 @@ async function handleExport(forms: any[], format: string, selectedMonth: { month
         orderBy: {
           createdAt: "desc",
         },
+        take: 5000,
       })
     }
 
     if (format === "excel") {
-      // Prepare data for Excel - create a row for each employee in each form
       const data: any[] = []
 
       forms.forEach((form) => {
-        // Check if form has multiple employees in form.data.employees
         if (form.data && form.data.employees && Array.isArray(form.data.employees) && form.data.employees.length > 0) {
-          // Create a row for each employee
           form.data.employees.forEach((employee: any) => {
-            // Get details based on form type
             let details = {}
             if (form.type === "leave" && form.data) {
-              details = {
-                "Leave Type": form.data.leaveType || "N/A",
-                "Start Date": form.data.startDate ? new Date(form.data.startDate).toLocaleDateString() : "N/A",
-                "End Date": form.data.endDate ? new Date(form.data.endDate).toLocaleDateString() : "N/A",
-                "Total Days": form.data.totalDays || "N/A",
-                "Half Day": form.data.isHalfDay ? "Yes" : "No",
-                "Early Leave": form.data.isEarlyLeave ? "Yes" : "No",
+              const isManualDates =
+                form.data.dateSelectionMode === "manual" && form.data.manualDates && form.data.manualDates.length > 0
+
+              if (isManualDates) {
+                const sortedDates = [...form.data.manualDates].sort(
+                  (a: string, b: string) => new Date(a).getTime() - new Date(b).getTime(),
+                )
+                details = {
+                  "Leave Type": form.data.leaveType || "N/A",
+                  "Date Selection": "Non-consecutive",
+                  "Selected Dates": sortedDates.map((d: string) => new Date(d).toLocaleDateString()).join(", "),
+                  "Start Date": sortedDates[0] ? new Date(sortedDates[0]).toLocaleDateString() : "N/A",
+                  "End Date": sortedDates[sortedDates.length - 1]
+                    ? new Date(sortedDates[sortedDates.length - 1]).toLocaleDateString()
+                    : "N/A",
+                  "Total Days": form.data.totalDays || "N/A",
+                  "Half Day": form.data.isHalfDay ? "Yes" : "No",
+                  "Early Leave": form.data.isEarlyLeave ? "Yes" : "No",
+                }
+              } else {
+                details = {
+                  "Leave Type": form.data.leaveType || "N/A",
+                  "Date Selection": "Consecutive",
+                  "Selected Dates": "N/A",
+                  "Start Date": form.data.startDate ? new Date(form.data.startDate).toLocaleDateString() : "N/A",
+                  "End Date": form.data.endDate ? new Date(form.data.endDate).toLocaleDateString() : "N/A",
+                  "Total Days": form.data.totalDays || "N/A",
+                  "Half Day": form.data.isHalfDay ? "Yes" : "No",
+                  "Early Leave": form.data.isEarlyLeave ? "Yes" : "No",
+                }
               }
-            } else if (form.data) {
+            } else if (form.type === "overtime" && form.data) {
               details = {
                 Date: form.data.date ? new Date(form.data.date).toLocaleDateString() : "N/A",
                 Hours: form.data.hours || "N/A",
+              }
+            } else if (form.type === "training-request" && form.data) {
+              details = {
+                "Training Title": form.data.trainingTitle || "N/A",
+                "Training Provider": form.data.trainingProvider || "N/A",
+                "Start Date": form.data.startDate ? new Date(form.data.startDate).toLocaleDateString() : "N/A",
+                "End Date": form.data.endDate ? new Date(form.data.endDate).toLocaleDateString() : "N/A",
+              }
+            } else if (form.type === "job-requisition" && form.data) {
+              details = {
+                "Request Position": form.data.jobRequisition?.requestPosition || "N/A",
+                "Department Name": form.data.jobRequisition?.departmentName || "N/A",
+                "Expected Start Date": form.data.jobRequisition?.expectedStartDate
+                  ? new Date(form.data.jobRequisition.expectedStartDate).toLocaleDateString()
+                  : "N/A",
+              }
+            } else if (form.data) {
+              details = {
+                Details: form.data.details || "N/A",
               }
             }
 
             data.push({
               "Request Type": form.type.charAt(0).toUpperCase() + form.type.slice(1),
               "Employee Name": employee.name || "",
-              "Employee ID": employee.employeeId || employee.id || "",
+              "Employee Code": employee.employeeCode || employee.id || "",
               Department: employee.department || "",
               Position: employee.position || "",
               Status: form.status.charAt(0).toUpperCase() + form.status.slice(1),
@@ -989,31 +1309,71 @@ async function handleExport(forms: any[], format: string, selectedMonth: { month
             })
           })
         } else {
-          // Fallback to original employee info if no employees array
           const employeeInfo = getEmployeeInfoFromForm(form)
 
-          // Get details based on form type
           let details = {}
           if (form.type === "leave" && form.data) {
-            details = {
-              "Leave Type": form.data.leaveType || "N/A",
-              "Start Date": form.data.startDate ? new Date(form.data.startDate).toLocaleDateString() : "N/A",
-              "End Date": form.data.endDate ? new Date(form.data.endDate).toLocaleDateString() : "N/A",
-              "Total Days": form.data.totalDays || "N/A",
-              "Half Day": form.data.isHalfDay ? "Yes" : "No",
-              "Early Leave": form.data.isEarlyLeave ? "Yes" : "No",
+            const isManualDates =
+              form.data.dateSelectionMode === "manual" && form.data.manualDates && form.data.manualDates.length > 0
+
+            if (isManualDates) {
+              const sortedDates = [...form.data.manualDates].sort(
+                (a: string, b: string) => new Date(a).getTime() - new Date(b).getTime(),
+              )
+              details = {
+                "Leave Type": form.data.leaveType || "N/A",
+                "Date Selection": "Non-consecutive",
+                "Selected Dates": sortedDates.map((d: string) => new Date(d).toLocaleDateString()).join(", "),
+                "Start Date": sortedDates[0] ? new Date(sortedDates[0]).toLocaleDateString() : "N/A",
+                "End Date": sortedDates[sortedDates.length - 1]
+                  ? new Date(sortedDates[sortedDates.length - 1]).toLocaleDateString()
+                  : "N/A",
+                "Total Days": form.data.totalDays || "N/A",
+                "Half Day": form.data.isHalfDay ? "Yes" : "No",
+                "Early Leave": form.data.isEarlyLeave ? "Yes" : "No",
+              }
+            } else {
+              details = {
+                "Leave Type": form.data.leaveType || "N/A",
+                "Date Selection": "Consecutive",
+                "Selected Dates": "N/A",
+                "Start Date": form.data.startDate ? new Date(form.data.startDate).toLocaleDateString() : "N/A",
+                "End Date": form.data.endDate ? new Date(form.data.endDate).toLocaleDateString() : "N/A",
+                "Total Days": form.data.totalDays || "N/A",
+                "Half Day": form.data.isHalfDay ? "Yes" : "No",
+                "Early Leave": form.data.isEarlyLeave ? "Yes" : "No",
+              }
             }
-          } else if (form.data) {
+          } else if (form.type === "overtime" && form.data) {
             details = {
               Date: form.data.date ? new Date(form.data.date).toLocaleDateString() : "N/A",
               Hours: form.data.hours || "N/A",
+            }
+          } else if (form.type === "training-request" && form.data) {
+            details = {
+              "Training Title": form.data.trainingTitle || "N/A",
+              "Training Provider": form.data.trainingProvider || "N/A",
+              "Start Date": form.data.startDate ? new Date(form.data.startDate).toLocaleDateString() : "N/A",
+              "End Date": form.data.endDate ? new Date(form.data.endDate).toLocaleDateString() : "N/A",
+            }
+          } else if (form.type === "job-requisition" && form.data) {
+            details = {
+              "Request Position": form.data.jobRequisition?.requestPosition || "N/A",
+              "Department Name": form.data.jobRequisition?.departmentName || "N/A",
+              "Expected Start Date": form.data.jobRequisition?.expectedStartDate
+                ? new Date(form.data.jobRequisition.expectedStartDate).toLocaleDateString()
+                : "N/A",
+            }
+          } else if (form.data) {
+            details = {
+              Details: form.data.details || "N/A",
             }
           }
 
           data.push({
             "Request Type": form.type.charAt(0).toUpperCase() + form.type.slice(1),
             "Employee Name": employeeInfo.name,
-            "Employee ID": employeeInfo.employeeId,
+            "Employee Code": employeeInfo.employeeCode,
             Department: employeeInfo.department,
             Position: employeeInfo.position,
             Status: form.status.charAt(0).toUpperCase() + form.status.slice(1),
@@ -1024,46 +1384,41 @@ async function handleExport(forms: any[], format: string, selectedMonth: { month
         }
       })
 
-      // Create worksheet
       const ws = XLSX.utils.json_to_sheet(data)
 
-      // Set column widths
       const colWidths = [
-        { wch: 15 }, // Request Type
-        { wch: 25 }, // Employee Name
-        { wch: 15 }, // Employee ID
-        { wch: 20 }, // Department
-        { wch: 20 }, // Position
-        { wch: 12 }, // Status
-        { wch: 15 }, // Submission Date
-        { wch: 15 }, // Leave Type/Date
-        { wch: 15 }, // Start Date/Hours
-        { wch: 15 }, // End Date
-        { wch: 10 }, // Total Days
-        { wch: 10 }, // Half Day
-        { wch: 10 }, // Early Leave
-        { wch: 40 }, // Reason
+        { wch: 15 },
+        { wch: 25 },
+        { wch: 15 },
+        { wch: 20 },
+        { wch: 20 },
+        { wch: 12 },
+        { wch: 15 },
+        { wch: 15 },
+        { wch: 15 },
+        { wch: 40 },
+        { wch: 15 },
+        { wch: 15 },
+        { wch: 10 },
+        { wch: 10 },
+        { wch: 10 },
+        { wch: 40 },
       ]
       ws["!cols"] = colWidths
 
-      // Create workbook
       const wb = XLSX.utils.book_new()
       XLSX.utils.book_append_sheet(wb, ws, "HR Forms")
 
-      // Generate Excel file
       const excelBuffer = XLSX.write(wb, { bookType: "xlsx", type: "buffer" })
 
-      // Generate filename
       const dateStr = new Date().toISOString().split("T")[0]
       let filename = `HR-Forms-Report-${dateStr}`
 
-      // Add month info to filename if month filter is applied
       if (selectedMonth) {
         const monthName = new Date(selectedMonth.year, selectedMonth.month).toLocaleString("default", { month: "long" })
         filename = `HR-Forms-Report-${monthName}-${selectedMonth.year}-${dateStr}`
       }
 
-      // Return Excel file
       return new Response(excelBuffer, {
         headers: {
           "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1071,23 +1426,19 @@ async function handleExport(forms: any[], format: string, selectedMonth: { month
         },
       })
     } else if (format === "pdf") {
-      // Create PDF document
       const doc = new jsPDF()
 
-      // Add company header
-      doc.setFillColor(0, 150, 136) // Teal color
+      doc.setFillColor(0, 150, 136)
       doc.rect(0, 0, 210, 20, "F")
       doc.setTextColor(255, 255, 255)
       doc.setFontSize(16)
       doc.setFont("helvetica", "bold")
       doc.text("PT HANG TONG MANUFACTORY", 105, 12, { align: "center" })
 
-      // Add title
       doc.setTextColor(0, 0, 0)
       doc.setFontSize(14)
       doc.text("HR Forms Report", 14, 30)
 
-      // Add date range if applicable
       if (selectedMonth) {
         const startDate = new Date(selectedMonth.year, selectedMonth.month, 1)
         const endDate = new Date(selectedMonth.year, selectedMonth.month + 1, 0)
@@ -1095,12 +1446,10 @@ async function handleExport(forms: any[], format: string, selectedMonth: { month
         doc.text(`Period: ${startDate.toLocaleDateString()} - ${endDate.toLocaleDateString()}`, 14, 38)
       }
 
-      // Add generation info
       doc.setFontSize(8)
       doc.setTextColor(100, 100, 100)
       doc.text(`Generated on: ${new Date().toLocaleString()}`, 14, 44)
 
-      // Add table headers with background
       doc.setFillColor(240, 240, 240)
       doc.rect(14, 50, 182, 8, "F")
       doc.setFont("helvetica", "bold")
@@ -1113,149 +1462,59 @@ async function handleExport(forms: any[], format: string, selectedMonth: { month
       doc.text("Status", 165, 56)
       doc.text("Date", 185, 56)
 
-      // Add table content
       let y = 64
       doc.setFont("helvetica", "normal")
       doc.setTextColor(0, 0, 0)
 
-      // Create rows for each employee in each form
       let rowIndex = 0
       forms.forEach((form) => {
-        // Check if form has multiple employees in form.data.employees
-        if (form.data && form.data.employees && Array.isArray(form.data.employees) && form.data.employees.length > 0) {
-          // Create a row for each employee
-          form.data.employees.forEach((employee: any) => {
-            // Add alternating row background
-            if (rowIndex % 2 === 0) {
-              doc.setFillColor(248, 248, 248)
-              doc.rect(14, y - 4, 182, 10, "F")
-            }
+        const employeeInfo = getEmployeeInfoFromForm(form)
 
-            // Type
-            doc.text(form.type.charAt(0).toUpperCase() + form.type.slice(1), 16, y)
+        if (rowIndex % 2 === 0) {
+          doc.setFillColor(248, 248, 248)
+          doc.rect(14, y - 4, 182, 10, "F")
+        }
 
-            // Employee (full name)
-            doc.text(employee.name || "", 45, y)
+        doc.text(form.type.charAt(0).toUpperCase() + form.type.slice(1), 16, y)
+        doc.text(employeeInfo.name.substring(0, 20), 45, y)
+        doc.text(employeeInfo.department.substring(0, 15), 85, y)
 
-            // Department
-            doc.text(employee.department || "", 85, y)
-
-            // Details
-            const details =
-              form.type === "leave" && form.data
-                ? `${form.data.leaveType || "N/A"}, ${form.data.totalDays || "N/A"} days`
-                : form.data
-                  ? `${form.data.hours || "N/A"} hours`
-                  : "N/A"
-            doc.text(details, 125, y)
-
-            // Status
-            doc.text(form.status.charAt(0).toUpperCase() + form.status.slice(1), 165, y)
-
-            // Date
-            doc.text(new Date(form.createdAt).toLocaleDateString(), 185, y)
-
-            y += 10
-            rowIndex++
-
-            // Add new page if needed
-            if (y > 280) {
-              doc.addPage()
-
-              // Add header to new page
-              doc.setFillColor(0, 150, 136)
-              doc.rect(0, 0, 210, 15, "F")
-              doc.setTextColor(255, 255, 255)
-              doc.setFontSize(12)
-              doc.setFont("helvetica", "bold")
-              doc.text("PT HANG TONG MANUFACTORY - HR Forms Report (Continued)", 105, 10, { align: "center" })
-
-              // Reset for content
-              doc.setTextColor(0, 0, 0)
-              doc.setFont("helvetica", "normal")
-              y = 30
-            }
-          })
-        } else {
-          // Fallback to original employee info if no employees array
-          const employeeInfo = getEmployeeInfoFromForm(form)
-
-          // Add alternating row background
-          if (rowIndex % 2 === 0) {
-            doc.setFillColor(248, 248, 248)
-            doc.rect(14, y - 4, 182, 10, "F")
+        let details = "N/A"
+        if (form.type === "leave" && form.data) {
+          const isManualDates =
+            form.data.dateSelectionMode === "manual" && form.data.manualDates && form.data.manualDates.length > 0
+          if (isManualDates) {
+            details = `${form.data.leaveType || "N/A"}, ${form.data.manualDates.length} dates`
+          } else {
+            details = `${form.data.leaveType || "N/A"}, ${form.data.totalDays || "N/A"} days`
           }
+        } else if (form.type === "overtime" && form.data) {
+          details = `${form.data.hours || "N/A"} hours`
+        }
+        doc.text(details.substring(0, 20), 125, y)
 
-          // Type
-          doc.text(form.type.charAt(0).toUpperCase() + form.type.slice(1), 16, y)
+        doc.text(form.status.charAt(0).toUpperCase() + form.status.slice(1), 165, y)
+        doc.text(new Date(form.createdAt).toLocaleDateString(), 185, y)
 
-          // Employee (full name)
-          doc.text(employeeInfo.name, 45, y)
+        y += 10
+        rowIndex++
 
-          // Department
-          doc.text(employeeInfo.department, 85, y)
-
-          // Details
-          const details =
-            form.type === "leave" && form.data
-              ? `${form.data.leaveType || "N/A"}, ${form.data.totalDays || "N/A"} days`
-              : form.data
-                ? `${form.data.hours || "N/A"} hours`
-                : "N/A"
-          doc.text(details, 125, y)
-
-          // Status
-          doc.text(form.status.charAt(0).toUpperCase() + form.status.slice(1), 165, y)
-
-          // Date
-          doc.text(new Date(form.createdAt).toLocaleDateString(), 185, y)
-
-          y += 10
-          rowIndex++
-
-          // Add new page if needed
-          if (y > 280) {
-            doc.addPage()
-
-            // Add header to new page
-            doc.setFillColor(0, 150, 136)
-            doc.rect(0, 0, 210, 15, "F")
-            doc.setTextColor(255, 255, 255)
-            doc.setFontSize(12)
-            doc.setFont("helvetica", "bold")
-            doc.text("PT HANG TONG MANUFACTORY - HR Forms Report (Continued)", 105, 10, { align: "center" })
-
-            // Reset for content
-            doc.setTextColor(0, 0, 0)
-            doc.setFont("helvetica", "normal")
-            y = 30
-          }
+        if (y > 280) {
+          doc.addPage()
+          y = 30
         }
       })
 
-      // Add footer with page numbers
-      const pageCount = (doc.internal as any).getNumberOfPages()
-      for (let i = 1; i <= pageCount; i++) {
-        doc.setPage(i)
-        doc.setFontSize(8)
-        doc.setTextColor(100, 100, 100)
-        doc.text(`Page ${i} of ${pageCount}`, 105, 290, { align: "center" })
-      }
-
-      // Generate PDF buffer
       const pdfBuffer = doc.output("arraybuffer")
 
-      // Generate filename
       const dateStr = new Date().toISOString().split("T")[0]
       let filename = `HR-Forms-Report-${dateStr}`
 
-      // Add month info to filename if month filter is applied
       if (selectedMonth) {
         const monthName = new Date(selectedMonth.year, selectedMonth.month).toLocaleString("default", { month: "long" })
         filename = `HR-Forms-Report-${monthName}-${selectedMonth.year}-${dateStr}`
       }
 
-      // Return PDF file
       return new Response(pdfBuffer, {
         headers: {
           "Content-Type": "application/pdf",
@@ -1264,10 +1523,33 @@ async function handleExport(forms: any[], format: string, selectedMonth: { month
       })
     }
 
-    // If format is not supported, return error
     return NextResponse.json({ error: "Unsupported export format" }, { status: 400 })
   } catch (error) {
-    console.error("Error exporting forms:", error)
+    console.error("❌ Error exporting forms:", error)
     return NextResponse.json({ error: "Failed to export forms" }, { status: 500 })
   }
+}
+
+function mapTrainingMode(mode: string) {
+  const modeMap: { [key: string]: any } = {
+    inPerson: "IN_PERSON",
+    online: "ONLINE",
+    hybrid: "HYBRID",
+    IN_PERSON: "IN_PERSON",
+    ONLINE: "ONLINE",
+    HYBRID: "HYBRID",
+  }
+  return modeMap[mode] || "IN_PERSON"
+}
+
+function mapEmployeeCategory(category: string) {
+  const categoryMap: { [key: string]: any } = {
+    staff: "STAFF",
+    manager: "MANAGER",
+    director: "DIRECTOR",
+    STAFF: "STAFF",
+    MANAGER: "MANAGER",
+    DIRECTOR: "DIRECTOR",
+  }
+  return categoryMap[category] || "STAFF"
 }

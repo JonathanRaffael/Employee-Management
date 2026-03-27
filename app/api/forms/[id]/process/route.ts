@@ -3,25 +3,20 @@ import { getServerSession } from "next-auth"
 import { authOptions } from "@/lib/auth"
 import { prisma } from "@/lib/prisma"
 
-interface SessionUser {
-  id: string
-  name?: string | null
-  email?: string | null
-  image?: string | null
-  role: string
-}
-
-interface CustomSession {
-  user: SessionUser
-}
-
-export async function POST(request: Request, context: { params: { id: string } }) {
+export async function PATCH(
+  request: Request,
+  { params }: { params: Promise<{ id: string }> }
+) {
   try {
-    // Use the id directly from context.params
-    const formId = context.params.id
+    const { id: formId } = await params
 
-    const session = (await getServerSession(authOptions)) as CustomSession | null
-    if (!session || !session.user) {
+    if (!formId) {
+      return NextResponse.json({ error: "Form ID is missing" }, { status: 400 })
+    }
+
+    const session = await getServerSession(authOptions)
+
+    if (!session?.user?.id) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
     }
 
@@ -30,9 +25,11 @@ export async function POST(request: Request, context: { params: { id: string } }
       select: { id: true, role: true },
     })
 
-    if (!user) {
-      return NextResponse.json({ error: "User not found" }, { status: 404 })
+    if (!user?.role) {
+      return NextResponse.json({ error: "User role not found" }, { status: 403 })
     }
+
+    const userRole = user.role.toLowerCase()
 
     const form = await prisma.form.findUnique({
       where: { id: formId },
@@ -43,58 +40,90 @@ export async function POST(request: Request, context: { params: { id: string } }
       return NextResponse.json({ error: "Form not found" }, { status: 404 })
     }
 
-    // PMC can only process overtime forms
-    if (user.role === "pmc" && form.type !== "overtime") {
-      return NextResponse.json({ error: "PMC can only process overtime forms" }, { status: 403 })
+    // 🔒 Role restriction
+    if (userRole === "supervisor" && form.type !== "overtime") {
+      return NextResponse.json(
+        { error: "Supervisor hanya boleh memproses lembur" },
+        { status: 403 }
+      )
     }
 
-    // HRD can process any form
-    if (user.role !== "hrd" && user.role === "pmc" && form.type !== "overtime") {
-      return NextResponse.json({ error: "Unauthorized. HRD role required for leave forms." }, { status: 403 })
+    if (userRole !== "hrd" && form.type === "leave") {
+      return NextResponse.json(
+        { error: "Hanya HRD yang boleh memproses cuti" },
+        { status: 403 }
+      )
     }
 
-    const { signature, comments } = await request.json()
+    const body = await request.json()
+    const comments =
+      typeof body?.comments === "string" && body.comments.trim()
+        ? body.comments.trim()
+        : null
 
-    // Find the approval for the current user's role
-    const userRoleApproval = form.approvals.find(
-      (approval: { role: string; id: string }) => approval.role === user.role,
+    const existingApproval = form.approvals.find(
+      (a) => a.role.toLowerCase() === userRole
     )
 
-    if (userRoleApproval) {
-      // Update existing approval
+    // ❌ Tidak boleh ubah approval yang sudah APPROVED
+    if (existingApproval?.status === "APPROVED") {
+      return NextResponse.json(
+        { error: "Approval sudah final dan tidak bisa diubah" },
+        { status: 400 }
+      )
+    }
+
+    // ✅ Catat PROCESS (tanpa signature)
+    if (existingApproval) {
       await prisma.approval.update({
-        where: { id: userRoleApproval.id },
+        where: { id: existingApproval.id },
         data: {
-          status: "process",
-          signature,
+          status: "PROCESS",
           comments,
           approverId: user.id,
         },
       })
     } else {
-      // Create new approval if it doesn't exist
       await prisma.approval.create({
         data: {
           formId,
-          role: user.role,
-          status: "process",
-          signature,
+          role: userRole,
+          status: "PROCESS",
           comments,
           approverId: user.id,
         },
       })
     }
 
-    await prisma.form.update({
+     const updatedForm = await prisma.form.findUnique({
       where: { id: formId },
-      data: {
-        status: "process",
+      include: {
+        approvals: {
+          include: {
+            approver: {
+              select: { id: true, name: true, role: true },
+            },
+          },
+        },
       },
     })
 
-    return NextResponse.json({ success: true })
+    return NextResponse.json({
+      success: true,
+      status: "PROCESS",
+      message: "Form marked as In Process",
+      form: updatedForm,
+    })
   } catch (error) {
-    console.error("Error processing form:", error)
-    return NextResponse.json({ error: "Failed to process form" }, { status: 500 })
+    console.error("PROCESS FORM ERROR:", error)
+    return NextResponse.json(
+      {
+        error:
+          error instanceof Error
+            ? error.message
+            : "Failed to process form",
+      },
+      { status: 500 }
+    )
   }
 }

@@ -231,21 +231,21 @@ export default function OvertimeFormComponent({ user }: OvertimeFormProps) {
       if (response.ok) {
         // Send email notifications
         try {
-          // Get recipients from environment variables
-          const hrdEmail = process.env.HRD_EMAIL || "admn.htmf@gmail.com"
-          const pmcEmail = process.env.PMC_EMAIL || "yenci1505.htm@gmail.com"
+          // Get recipients - only send to admin.htmf@gmail.com and supervisor
+          const hrdEmail = "admn.htmf@gmail.com,meliana.htm@gmail.com"
+          const supervisorEmail = process.env.supervisor_EMAIL || "sitanggangyenci17@gmail.com"
 
           // Prepare notification data
           const formNumber = data.formNumber || "N/A"
 
-          // Send notification to HRD and PMC
+          // Send notification to HRD and supervisor
           await fetch("/api/send-email", {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
             },
             body: JSON.stringify({
-              to: `${hrdEmail},${pmcEmail}`,
+              to: `${hrdEmail},${supervisorEmail}`,
               subject: `New Overtime Request #${formNumber} - ${employees[0].name}`,
               html: `
                 <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 5px;">
@@ -281,7 +281,7 @@ export default function OvertimeFormComponent({ user }: OvertimeFormProps) {
         // Update the success toast message to include notification info
         toast({
           title: "Success",
-          description: "Overtime form submitted successfully. Email notifications have been sent to HRD and PMC.",
+          description: "Overtime form submitted successfully. Email notifications have been sent to HRD and supervisor.",
         })
         router.push("/dashboard")
       } else {
@@ -316,7 +316,7 @@ export default function OvertimeFormComponent({ user }: OvertimeFormProps) {
           <div className="flex justify-center mb-2">
             <div className="relative w-16 h-16">
               <Image
-                src="/images/Logo.jpg"
+                src="/images/logo-cropped.png"
                 alt="PT HANG TONG MANUFACTORY"
                 width={64}
                 height={64}
@@ -790,7 +790,7 @@ export default function OvertimeFormComponent({ user }: OvertimeFormProps) {
                           type="button"
                           variant="outline"
                           onClick={clearSignature}
-                          className="transition-all duration-200 hover:bg-red-50 hover:text-red-600 hover:border-red-200"
+                          className="transition-all duration-200 hover:bg-red-50 hover:text-red-600 hover:border-red-200 bg-transparent"
                         >
                           <svg
                             xmlns="http://www.w3.org/2000/svg"
@@ -901,7 +901,7 @@ export default function OvertimeFormComponent({ user }: OvertimeFormProps) {
 
           <CardFooter className="flex justify-between border-t pt-6">
             {currentStep > 1 ? (
-              <Button type="button" variant="outline" onClick={handlePrevStep} className="group">
+              <Button type="button" variant="outline" onClick={handlePrevStep} className="group bg-transparent">
                 <svg
                   xmlns="http://www.w3.org/2000/svg"
                   width="16"

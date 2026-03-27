@@ -3,7 +3,7 @@
     "target": "ESNext",
     "module": "ESNext",
     "moduleResolution": "Node",
-    "jsx": "preserve",
+    "jsx": "react-jsx",
     "strict": true,
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
@@ -18,9 +18,11 @@
     ],
     "allowJs": true,
     "incremental": true,
-    "baseUrl": ".",                           // ✅ tambahkan ini
+    "baseUrl": ".", // ✅ tambahkan ini
     "paths": {
-      "@/*": ["./*"]                          // ✅ dan ini untuk path alias @/
+      "@/*": [
+        "./*"
+      ] // ✅ dan ini untuk path alias @/
     },
     "plugins": [
       {
@@ -32,7 +34,8 @@
     "**/*.ts",
     "**/*.tsx",
     "next-env.d.ts",
-    ".next/types/**/*.ts"
+    ".next/types/**/*.ts",
+    ".next/dev/types/**/*.ts"
   ],
   "exclude": [
     "node_modules"

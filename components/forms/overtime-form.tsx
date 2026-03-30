@@ -23,10 +23,19 @@ import {
   AlertCircle,
   Loader2,
   Clock,
+  ChevronDown,
 } from "lucide-react"
 import SignatureCanvas from "react-signature-canvas"
 import { motion } from "framer-motion"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
+
+interface EmployeeData {
+  id: string
+  employeeCode: string
+  name: string
+  department: string
+  position: string
+}
 
 interface OvertimeFormProps {
   user: any
@@ -49,15 +58,47 @@ export default function OvertimeFormComponent({ user }: OvertimeFormProps) {
   const [currentStep, setCurrentStep] = useState(1)
   const [formProgress, setFormProgress] = useState(0)
 
+  // Employee list from API
+  const [availableEmployees, setAvailableEmployees] = useState<EmployeeData[]>([])
+  const [loadingEmployees, setLoadingEmployees] = useState(true)
+  const [searchQuery, setSearchQuery] = useState("")
+  const [openDropdownIndex, setOpenDropdownIndex] = useState<number | null>(null)
+
   // Employee Information
   const [employees, setEmployees] = useState([
     {
+      id: user?.id || "",
       name: user?.name || "",
       position: user?.position || "",
       employeeId: user?.employeeId || "",
       department: user?.department || "",
     },
   ])
+
+  // Fetch employees from API on component mount
+  useEffect(() => {
+    const fetchEmployees = async () => {
+      try {
+        setLoadingEmployees(true)
+        const response = await fetch("/api/employees")
+        if (response.ok) {
+          const data = await response.json()
+          setAvailableEmployees(data)
+        }
+      } catch (error) {
+        console.error("Error fetching employees:", error)
+        toast({
+          title: "Warning",
+          description: "Failed to load employee list. You can still enter employee data manually.",
+          variant: "destructive",
+        })
+      } finally {
+        setLoadingEmployees(false)
+      }
+    }
+
+    fetchEmployees()
+  }, [])
 
   // Update progress bar
   useEffect(() => {
@@ -372,6 +413,7 @@ export default function OvertimeFormComponent({ user }: OvertimeFormProps) {
                               setEmployees([
                                 ...employees,
                                 {
+                                  id: "",
                                   name: "",
                                   position: "",
                                   employeeId: "",
@@ -439,6 +481,71 @@ export default function OvertimeFormComponent({ user }: OvertimeFormProps) {
                           </Button>
                         )}
                       </div>
+
+                      {/* Select Employee Dropdown */}
+                      {availableEmployees.length > 0 && (
+                        <div className="space-y-2">
+                          <Label className="flex items-center">
+                            <User className="h-4 w-4 mr-1 text-gray-400" />
+                            Select Employee
+                          </Label>
+                          <div className="relative">
+                            <button
+                              type="button"
+                              onClick={() => setOpenDropdownIndex(openDropdownIndex === index ? null : index)}
+                              className="w-full px-3 py-2 border border-slate-300 dark:border-slate-700 rounded-md bg-white dark:bg-slate-900 flex items-center justify-between hover:bg-slate-50 dark:hover:bg-slate-800 transition-all duration-200"
+                            >
+                              <span className="text-left text-sm">
+                                {employee.name || "Choose an employee..."}
+                              </span>
+                              <ChevronDown className="h-4 w-4 text-gray-400" />
+                            </button>
+                            {openDropdownIndex === index && (
+                              <div className="absolute top-full left-0 right-0 mt-1 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-md shadow-lg z-50 max-h-64 overflow-y-auto">
+                                <Input
+                                  type="text"
+                                  placeholder="Search employee..."
+                                  value={searchQuery}
+                                  onChange={(e) => setSearchQuery(e.target.value)}
+                                  className="m-2 border-slate-300 dark:border-slate-700"
+                                  autoFocus
+                                />
+                                {availableEmployees
+                                  .filter(
+                                    (emp) =>
+                                      emp.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                                      emp.employeeCode.toLowerCase().includes(searchQuery.toLowerCase())
+                                  )
+                                  .map((emp) => (
+                                    <div
+                                      key={emp.id}
+                                      onClick={() => {
+                                        const newEmployees = [...employees]
+                                        newEmployees[index] = {
+                                          id: emp.id,
+                                          name: emp.name,
+                                          position: emp.position,
+                                          employeeId: emp.employeeCode,
+                                          department: emp.department,
+                                        }
+                                        setEmployees(newEmployees)
+                                        setOpenDropdownIndex(null)
+                                        setSearchQuery("")
+                                      }}
+                                      className="px-3 py-2 hover:bg-teal-50 dark:hover:bg-teal-900/20 cursor-pointer border-b border-slate-200 dark:border-slate-700 last:border-b-0"
+                                    >
+                                      <p className="font-medium text-sm">{emp.name}</p>
+                                      <p className="text-xs text-gray-500">
+                                        {emp.employeeCode} • {emp.department}
+                                      </p>
+                                    </div>
+                                  ))}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      )}
+
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
                         <div className="space-y-2">
                           <Label htmlFor={`employee-name-${index}`} className="flex items-center">
@@ -456,7 +563,11 @@ export default function OvertimeFormComponent({ user }: OvertimeFormProps) {
                             className="transition-all duration-200 focus:border-teal-300 focus:ring-teal-200 border-slate-300 dark:border-slate-700"
                             placeholder="Enter full name"
                             required
+                            disabled={availableEmployees.length > 0}
                           />
+                          {availableEmployees.length > 0 && (
+                            <p className="text-xs text-gray-500">Auto-filled from selection above</p>
+                          )}
                         </div>
                         <div className="space-y-2">
                           <Label htmlFor={`position-${index}`} className="flex items-center">
@@ -474,7 +585,11 @@ export default function OvertimeFormComponent({ user }: OvertimeFormProps) {
                             className="transition-all duration-200 focus:border-teal-300 focus:ring-teal-200 border-slate-300 dark:border-slate-700"
                             placeholder="Enter position"
                             required
+                            disabled={availableEmployees.length > 0}
                           />
+                          {availableEmployees.length > 0 && (
+                            <p className="text-xs text-gray-500">Auto-filled from selection above</p>
+                          )}
                         </div>
 
                         <div className="space-y-2">
@@ -529,7 +644,11 @@ export default function OvertimeFormComponent({ user }: OvertimeFormProps) {
                             className="transition-all duration-200 focus:border-teal-300 focus:ring-teal-200 border-slate-300 dark:border-slate-700"
                             placeholder="Enter department"
                             required
+                            disabled={availableEmployees.length > 0}
                           />
+                          {availableEmployees.length > 0 && (
+                            <p className="text-xs text-gray-500">Auto-filled from selection above</p>
+                          )}
                         </div>
                       </div>
                     </motion.div>

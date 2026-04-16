@@ -2,7 +2,7 @@
   "compilerOptions": {
     "target": "ESNext",
     "module": "ESNext",
-    "moduleResolution": "Node",
+    "moduleResolution": "bundler",
     "jsx": "react-jsx",
     "strict": true,
     "esModuleInterop": true,
@@ -11,19 +11,18 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "noEmit": true,
-    "lib": [
-      "dom",
-      "dom.iterable",
-      "esnext"
-    ],
+    "lib": ["dom", "dom.iterable", "esnext"],
     "allowJs": true,
     "incremental": true,
-    "baseUrl": ".", // ✅ tambahkan ini
+
+    // ✅ WAJIB kalau pakai paths
+    "baseUrl": ".",
+    "ignoreDeprecations": "6.0",
+
     "paths": {
-      "@/*": [
-        "./*"
-      ] // ✅ dan ini untuk path alias @/
+      "@/*": ["./*"]
     },
+
     "plugins": [
       {
         "name": "next"
@@ -37,7 +36,5 @@
     ".next/types/**/*.ts",
     ".next/dev/types/**/*.ts"
   ],
-  "exclude": [
-    "node_modules"
-  ]
+  "exclude": ["node_modules"]
 }

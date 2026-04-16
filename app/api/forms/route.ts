@@ -845,6 +845,7 @@ export async function GET(request: Request) {
             select: {
               id: true,
               name: true,
+              employeeCode: true,
               department: true,
               position: true,
             },
@@ -1144,28 +1145,21 @@ function getTimeFilterDates(filter: string) {
 }
 
 function getEmployeeInfoFromForm(form: any) {
-  if (form.data && form.data.employees && Array.isArray(form.data.employees) && form.data.employees.length > 0) {
+  // Always prioritize form.employee from database relation (includes proper employeeCode)
+  if (form.employee && form.employee.id) {
     return {
-      name: form.data.employees[0].name || "",
-      employeeCode: form.data.employees[0].employeeCode || form.data.employees[0].id || "",
-      department: form.data.employees[0].department || "",
-      position: form.data.employees[0].position || "",
+      name: form.employee.name || "",
+      employeeCode: form.employee.employeeCode || "",
+      department: form.employee.department || "",
+      position: form.employee.position || "",
     }
   }
 
-  if (form.data && form.data.employee) {
-    return {
-      name: form.data.employee.name || "",
-      employeeCode: form.data.employee.employeeCode || form.data.employee.id || "",
-      department: form.data.employee.department || "",
-      position: form.data.employee.position || "",
-    }
-  }
-
+  // Fallback to form.data fields if employee relation is not available
   if (form.data) {
     const employeeData = {
       name: form.data.employeeName || form.data.name || "",
-      employeeCode: form.data.employeeCode || form.data.id || "",
+      employeeCode: form.data.employeeCode || "",
       department: form.data.department || "",
       position: form.data.position || "",
     }
@@ -1175,7 +1169,7 @@ function getEmployeeInfoFromForm(form: any) {
     }
   }
 
-  return form.employee || { name: "", employeeCode: "", department: "", position: "" }
+  return { name: "", employeeCode: "", department: "", position: "" }
 }
 
 async function handleExport(forms: any[], format: string, selectedMonth: { month: number; year: number } | null) {
@@ -1205,6 +1199,7 @@ async function handleExport(forms: any[], format: string, selectedMonth: { month
             select: {
               id: true,
               name: true,
+              employeeCode: true,
               department: true,
               position: true,
             },
@@ -1231,14 +1226,55 @@ async function handleExport(forms: any[], format: string, selectedMonth: { month
       })
     }
 
+    // Pre-fetch all employees for efficient lookup
+    const allEmployees = await prisma.employee.findMany({
+      select: {
+        id: true,
+        name: true,
+        employeeCode: true,
+        department: true,
+        position: true,
+      },
+    })
+
     if (format === "excel") {
       const data: any[] = []
 
       forms.forEach((form) => {
-        if (form.data && form.data.employees && Array.isArray(form.data.employees) && form.data.employees.length > 0) {
-          form.data.employees.forEach((employee: any) => {
-            let details = {}
-            if (form.type === "leave" && form.data) {
+        // Special handling for overtime: use employees from form.data.employees array, not form.employee
+        if (form.type === "overtime" && form.data && form.data.employees && Array.isArray(form.data.employees) && form.data.employees.length > 0) {
+          // For overtime, iterate through each employee in the form
+          form.data.employees.forEach((selectedEmployee: any) => {
+            // Lookup employee code from pre-fetched employees by name (case-insensitive partial match)
+            const dbEmployee = allEmployees.find(emp => 
+              emp.name.toLowerCase().includes(selectedEmployee.name.toLowerCase()) ||
+              selectedEmployee.name.toLowerCase().includes(emp.name.toLowerCase())
+            )
+            
+            const employee = dbEmployee || selectedEmployee
+            
+            const details = {
+              Date: form.data.date ? new Date(form.data.date).toLocaleDateString() : "N/A",
+              Hours: form.data.hours || "N/A",
+            }
+
+            data.push({
+              "Request Type": "Overtime",
+              "Employee Name": employee.name || selectedEmployee.name || "",
+              "Employee Code": dbEmployee?.employeeCode || "",
+              Department: employee.department || selectedEmployee.department || "",
+              Position: employee.position || selectedEmployee.position || "",
+              Status: form.status.charAt(0).toUpperCase() + form.status.slice(1),
+              "Submission Date": new Date(form.createdAt).toLocaleDateString(),
+              ...details,
+              Reason: form.data?.reason || "N/A",
+            })
+          })
+        } else if (form.employee && form.employee.id) {
+          // Use employee from database relation (works for all form types except overtime)
+          const employee = form.employee
+          let details = {}
+          if (form.type === "leave" && form.data) {
               const isManualDates =
                 form.data.dateSelectionMode === "manual" && form.data.manualDates && form.data.manualDates.length > 0
 
@@ -1296,17 +1332,16 @@ async function handleExport(forms: any[], format: string, selectedMonth: { month
               }
             }
 
-            data.push({
-              "Request Type": form.type.charAt(0).toUpperCase() + form.type.slice(1),
-              "Employee Name": employee.name || "",
-              "Employee Code": employee.employeeCode || employee.id || "",
-              Department: employee.department || "",
-              Position: employee.position || "",
-              Status: form.status.charAt(0).toUpperCase() + form.status.slice(1),
-              "Submission Date": new Date(form.createdAt).toLocaleDateString(),
-              ...details,
-              Reason: form.data?.reason || "N/A",
-            })
+          data.push({
+            "Request Type": form.type.charAt(0).toUpperCase() + form.type.slice(1),
+            "Employee Name": employee.name || "",
+            "Employee Code": employee.employeeCode || "",
+            Department: employee.department || "",
+            Position: employee.position || "",
+            Status: form.status.charAt(0).toUpperCase() + form.status.slice(1),
+            "Submission Date": new Date(form.createdAt).toLocaleDateString(),
+            ...details,
+            Reason: form.data?.reason || "N/A",
           })
         } else {
           const employeeInfo = getEmployeeInfoFromForm(form)
@@ -1373,7 +1408,7 @@ async function handleExport(forms: any[], format: string, selectedMonth: { month
           data.push({
             "Request Type": form.type.charAt(0).toUpperCase() + form.type.slice(1),
             "Employee Name": employeeInfo.name,
-            "Employee Code": employeeInfo.employeeCode,
+            "Employee Code": employeeInfo.employeeCode || "",
             Department: employeeInfo.department,
             Position: employeeInfo.position,
             Status: form.status.charAt(0).toUpperCase() + form.status.slice(1),

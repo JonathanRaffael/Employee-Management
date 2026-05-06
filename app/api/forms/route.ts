@@ -1241,9 +1241,9 @@ async function handleExport(forms: any[], format: string, selectedMonth: { month
       const data: any[] = []
 
       forms.forEach((form) => {
-        // Special handling for overtime: use employees from form.data.employees array, not form.employee
-        if (form.type === "overtime" && form.data && form.data.employees && Array.isArray(form.data.employees) && form.data.employees.length > 0) {
-          // For overtime, iterate through each employee in the form
+        // Special handling for overtime and leave: use employees from form.data.employees array, not form.employee
+        if ((form.type === "overtime" || form.type === "leave") && form.data && form.data.employees && Array.isArray(form.data.employees) && form.data.employees.length > 0) {
+          // For overtime and leave, iterate through each employee in the form
           form.data.employees.forEach((selectedEmployee: any) => {
             // Lookup employee code from pre-fetched employees by name (case-insensitive partial match)
             const dbEmployee = allEmployees.find(emp => 
@@ -1253,13 +1253,48 @@ async function handleExport(forms: any[], format: string, selectedMonth: { month
             
             const employee = dbEmployee || selectedEmployee
             
-            const details = {
-              Date: form.data.date ? new Date(form.data.date).toLocaleDateString() : "N/A",
-              Hours: form.data.hours || "N/A",
+            let details = {}
+            if (form.type === "leave" && form.data) {
+              const isManualDates =
+                form.data.dateSelectionMode === "manual" && form.data.manualDates && form.data.manualDates.length > 0
+
+              if (isManualDates) {
+                const sortedDates = [...form.data.manualDates].sort(
+                  (a: string, b: string) => new Date(a).getTime() - new Date(b).getTime(),
+                )
+                details = {
+                  "Leave Type": form.data.leaveType || "N/A",
+                  "Date Selection": "Non-consecutive",
+                  "Selected Dates": sortedDates.map((d: string) => new Date(d).toLocaleDateString()).join(", "),
+                  "Start Date": sortedDates[0] ? new Date(sortedDates[0]).toLocaleDateString() : "N/A",
+                  "End Date": sortedDates[sortedDates.length - 1]
+                    ? new Date(sortedDates[sortedDates.length - 1]).toLocaleDateString()
+                    : "N/A",
+                  "Total Days": form.data.totalDays || "N/A",
+                  "Half Day": form.data.isHalfDay ? "Yes" : "No",
+                  "Early Leave": form.data.isEarlyLeave ? "Yes" : "No",
+                }
+              } else {
+                details = {
+                  "Leave Type": form.data.leaveType || "N/A",
+                  "Date Selection": "Consecutive",
+                  "Selected Dates": "N/A",
+                  "Start Date": form.data.startDate ? new Date(form.data.startDate).toLocaleDateString() : "N/A",
+                  "End Date": form.data.endDate ? new Date(form.data.endDate).toLocaleDateString() : "N/A",
+                  "Total Days": form.data.totalDays || "N/A",
+                  "Half Day": form.data.isHalfDay ? "Yes" : "No",
+                  "Early Leave": form.data.isEarlyLeave ? "Yes" : "No",
+                }
+              }
+            } else if (form.type === "overtime" && form.data) {
+              details = {
+                Date: form.data.date ? new Date(form.data.date).toLocaleDateString() : "N/A",
+                Hours: form.data.hours || "N/A",
+              }
             }
 
             data.push({
-              "Request Type": "Overtime",
+              "Request Type": form.type.charAt(0).toUpperCase() + form.type.slice(1),
               "Employee Name": employee.name || selectedEmployee.name || "",
               "Employee Code": dbEmployee?.employeeCode || "",
               Department: employee.department || selectedEmployee.department || "",
@@ -1503,40 +1538,87 @@ async function handleExport(forms: any[], format: string, selectedMonth: { month
 
       let rowIndex = 0
       forms.forEach((form) => {
-        const employeeInfo = getEmployeeInfoFromForm(form)
+        // Handle multiple employees in form.data.employees (for leave and overtime)
+        if ((form.type === "overtime" || form.type === "leave") && form.data && form.data.employees && Array.isArray(form.data.employees) && form.data.employees.length > 0) {
+          form.data.employees.forEach((selectedEmployee: any) => {
+            if (rowIndex % 2 === 0) {
+              doc.setFillColor(248, 248, 248)
+              doc.rect(14, y - 4, 182, 10, "F")
+            }
 
-        if (rowIndex % 2 === 0) {
-          doc.setFillColor(248, 248, 248)
-          doc.rect(14, y - 4, 182, 10, "F")
-        }
+            doc.text(form.type.charAt(0).toUpperCase() + form.type.slice(1), 16, y)
+            doc.text(selectedEmployee.name.substring(0, 20), 45, y)
+            doc.text((selectedEmployee.department || "").substring(0, 15), 85, y)
 
-        doc.text(form.type.charAt(0).toUpperCase() + form.type.slice(1), 16, y)
-        doc.text(employeeInfo.name.substring(0, 20), 45, y)
-        doc.text(employeeInfo.department.substring(0, 15), 85, y)
+            let details = "N/A"
+            if (form.type === "leave" && form.data) {
+              const isManualDates =
+                form.data.dateSelectionMode === "manual" && form.data.manualDates && form.data.manualDates.length > 0
+              if (isManualDates) {
+                details = `${form.data.leaveType || "N/A"}, ${form.data.manualDates.length} dates`
+              } else {
+                details = `${form.data.leaveType || "N/A"}, ${form.data.totalDays || "N/A"} days`
+              }
+            } else if (form.type === "overtime" && form.data) {
+              details = `${form.data.hours || "N/A"} hours`
+            }
 
-        let details = "N/A"
-        if (form.type === "leave" && form.data) {
-          const isManualDates =
-            form.data.dateSelectionMode === "manual" && form.data.manualDates && form.data.manualDates.length > 0
-          if (isManualDates) {
-            details = `${form.data.leaveType || "N/A"}, ${form.data.manualDates.length} dates`
-          } else {
-            details = `${form.data.leaveType || "N/A"}, ${form.data.totalDays || "N/A"} days`
+            doc.text(details.substring(0, 30), 125, y)
+            doc.text(form.status.charAt(0).toUpperCase() + form.status.slice(1), 165, y)
+            doc.setTextColor(100, 100, 100)
+            doc.setFontSize(7)
+            doc.text(new Date(form.createdAt).toLocaleDateString(), 185, y)
+            doc.setTextColor(0, 0, 0)
+            doc.setFontSize(9)
+
+            y += 10
+            rowIndex++
+
+            if (y > 270) {
+              doc.addPage()
+              y = 20
+            }
+          })
+        } else {
+          const employeeInfo = getEmployeeInfoFromForm(form)
+
+          if (rowIndex % 2 === 0) {
+            doc.setFillColor(248, 248, 248)
+            doc.rect(14, y - 4, 182, 10, "F")
           }
-        } else if (form.type === "overtime" && form.data) {
-          details = `${form.data.hours || "N/A"} hours`
-        }
-        doc.text(details.substring(0, 20), 125, y)
 
-        doc.text(form.status.charAt(0).toUpperCase() + form.status.slice(1), 165, y)
-        doc.text(new Date(form.createdAt).toLocaleDateString(), 185, y)
+          doc.text(form.type.charAt(0).toUpperCase() + form.type.slice(1), 16, y)
+          doc.text(employeeInfo.name.substring(0, 20), 45, y)
+          doc.text(employeeInfo.department.substring(0, 15), 85, y)
 
-        y += 10
-        rowIndex++
+          let details = "N/A"
+          if (form.type === "leave" && form.data) {
+            const isManualDates =
+              form.data.dateSelectionMode === "manual" && form.data.manualDates && form.data.manualDates.length > 0
+            if (isManualDates) {
+              details = `${form.data.leaveType || "N/A"}, ${form.data.manualDates.length} dates`
+            } else {
+              details = `${form.data.leaveType || "N/A"}, ${form.data.totalDays || "N/A"} days`
+            }
+          } else if (form.type === "overtime" && form.data) {
+            details = `${form.data.hours || "N/A"} hours`
+          }
 
-        if (y > 280) {
-          doc.addPage()
-          y = 30
+          doc.text(details.substring(0, 30), 125, y)
+          doc.text(form.status.charAt(0).toUpperCase() + form.status.slice(1), 165, y)
+          doc.setTextColor(100, 100, 100)
+          doc.setFontSize(7)
+          doc.text(new Date(form.createdAt).toLocaleDateString(), 185, y)
+          doc.setTextColor(0, 0, 0)
+          doc.setFontSize(9)
+
+          y += 10
+          rowIndex++
+
+          if (y > 270) {
+            doc.addPage()
+            y = 20
+          }
         }
       })
 

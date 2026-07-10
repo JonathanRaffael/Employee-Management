@@ -347,7 +347,7 @@ function sendNewFormNotification(form: any, user: SessionUser) {
           recipients.push(...hrdEmail.split(",").map((email) => email.trim()))
         }
       } else if (form.type === "overtime") {
-        const adminEmail = "admn.htmf@gmail.com"
+        const adminEmail = process.env.ADMIN_EMAIL || "admn.htmf@gmail.com"  // Dari env variable
         const supervisorEmail = process.env.SUPERVISOR_EMAIL || process.env.supervisor_EMAIL
 
         recipients.push(adminEmail)

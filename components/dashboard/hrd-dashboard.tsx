@@ -794,6 +794,10 @@ const [stats, setStats] = useState<DashboardStats>({
         params.append("page", page.toString())
         params.append("limit", pagination.limit.toString())
 
+        if (currentFilters.activeTab !== "all") {
+  params.append("status", currentFilters.activeTab.toUpperCase())
+}
+
         if (currentFilters.selectedMonth) {
           const startDate = new Date(currentFilters.selectedMonth.year, currentFilters.selectedMonth.month, 1)
           const endDate = new Date(currentFilters.selectedMonth.year, currentFilters.selectedMonth.month + 1, 0)
@@ -812,6 +816,8 @@ const [stats, setStats] = useState<DashboardStats>({
         if (currentFilters.departmentFilter !== "all") {
           params.append("department", currentFilters.departmentFilter)
         }
+
+        console.log(params.toString())
 
         console.log("🔄 Fetching forms with params:", params.toString())
 

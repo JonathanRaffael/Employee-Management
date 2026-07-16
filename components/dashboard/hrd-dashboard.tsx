@@ -701,79 +701,81 @@ export default function OptimizedHRDDashboard({ user }: { user: any }) {
     return Array.from(depts)
   }, [forms])
 
-  // ✅ Added job requisition and training request statistics to match leader dashboard
-  const stats = useMemo(() => {
-    const formsArray = Array.isArray(forms) ? forms : []
+  interface DashboardStats {
+  
+  total: number
+  pending: number
+  approved: number
+  rejected: number
 
-    const totalLeave = formsArray.filter((form) => form.type === "leave").length
-    const totalOvertime = formsArray.filter((form) => form.type === "overtime").length
-    const totalJobRequisition = formsArray.filter((form) => form.type === "job-requisition").length
-    const totalTrainingRequest = formsArray.filter((form) => form.type === "training-request").length
-    const pendingLeave = formsArray.filter(
-      (form) => form.type === "leave" && normalizeStatus(form.status) === "PENDING",
-    ).length
-    const pendingOvertime = formsArray.filter(
-      (form) => form.type === "overtime" && normalizeStatus(form.status) === "PENDING",
-    ).length
-    const pendingJobRequisition = formsArray.filter(
-      (form) => form.type === "job-requisition" && normalizeStatus(form.status) === "PENDING",
-    ).length
-    const pendingTrainingRequest = formsArray.filter(
-      (form) => form.type === "training-request" && normalizeStatus(form.status) === "PENDING",
-    ).length
-    const approvedLeave = formsArray.filter(
-      (form) => form.type === "leave" && normalizeStatus(form.status) === "APPROVED",
-    ).length
-    const approvedOvertime = formsArray.filter(
-      (form) => form.type === "overtime" && normalizeStatus(form.status) === "APPROVED",
-    ).length
-    const approvedJobRequisition = formsArray.filter(
-      (form) => form.type === "job-requisition" && normalizeStatus(form.status) === "APPROVED",
-    ).length
-    const approvedTrainingRequest = formsArray.filter(
-      (form) => form.type === "training-request" && normalizeStatus(form.status) === "APPROVED",
-    ).length
-    const rejectedLeave = formsArray.filter(
-      (form) => form.type === "leave" && normalizeStatus(form.status) === "REJECTED",
-    ).length
-    const rejectedOvertime = formsArray.filter(
-      (form) => form.type === "overtime" && normalizeStatus(form.status) === "REJECTED",
-    ).length
-    const rejectedJobRequisition = formsArray.filter(
-      (form) => form.type === "job-requisition" && normalizeStatus(form.status) === "REJECTED",
-    ).length
-    const rejectedTrainingRequest = formsArray.filter(
-      (form) => form.type === "training-request" && normalizeStatus(form.status) === "REJECTED",
-    ).length
+  totalLeave: number
+  totalOvertime: number
+  totalJobRequisition: number
+  totalTrainingRequest: number
 
-    return {
-      totalLeave,
-      totalOvertime,
-      totalJobRequisition,
-      totalTrainingRequest,
-      pendingLeave,
-      pendingOvertime,
-      pendingJobRequisition,
-      pendingTrainingRequest,
-      approvedLeave,
-      approvedOvertime,
-      approvedJobRequisition,
-      approvedTrainingRequest,
-      rejectedLeave,
-      rejectedOvertime,
-      rejectedJobRequisition,
-      rejectedTrainingRequest,
-      pendingLeavePercent: totalLeave ? Math.round((pendingLeave / totalLeave) * 100) : 0,
-      pendingOvertimePercent: totalOvertime ? Math.round((pendingOvertime / totalOvertime) * 100) : 0,
-      totalRequests: totalLeave + totalOvertime + totalJobRequisition + totalTrainingRequest,
-    }
-  }, [forms])
+  pendingLeave: number
+  pendingOvertime: number
+  pendingJobRequisition: number
+  pendingTrainingRequest: number
+
+  approvedLeave: number
+  approvedOvertime: number
+  approvedJobRequisition: number
+  approvedTrainingRequest: number
+
+  rejectedLeave: number
+  rejectedOvertime: number
+  rejectedJobRequisition: number
+  rejectedTrainingRequest: number
+
+  totalRequests: number
+
+  pendingLeavePercent: number
+  pendingOvertimePercent: number
+  pendingJobRequisitionPercent: number
+  pendingTrainingRequestPercent: number
+}
+
+const [stats, setStats] = useState<DashboardStats>({
+  total: 0,
+  pending: 0,
+  approved: 0,
+  rejected: 0,
+
+  totalLeave: 0,
+  totalOvertime: 0,
+  totalJobRequisition: 0,
+  totalTrainingRequest: 0,
+
+  pendingLeave: 0,
+  pendingOvertime: 0,
+  pendingJobRequisition: 0,
+  pendingTrainingRequest: 0,
+
+  approvedLeave: 0,
+  approvedOvertime: 0,
+  approvedJobRequisition: 0,
+  approvedTrainingRequest: 0,
+
+  rejectedLeave: 0,
+  rejectedOvertime: 0,
+  rejectedJobRequisition: 0,
+  rejectedTrainingRequest: 0,
+
+  totalRequests: 0,
+
+  pendingLeavePercent: 0,
+  pendingOvertimePercent: 0,
+  pendingJobRequisitionPercent: 0,
+  pendingTrainingRequestPercent: 0,
+})
 
   // ✅ FIXED: Improved fetchForms function with better error handling
   const fetchForms = useCallback(
     async (page = 1, currentFilters = debouncedFilters) => {
       const cacheKey = `forms:${dashboardCache.generateKey(currentFilters, page)}`
       const cachedData = dashboardCache.get<{ forms: Form[]; pagination: PaginationData }>(cacheKey)
+  
 
       if (cachedData) {
         console.log("✅ Using cached data for:", cacheKey)
@@ -830,6 +832,7 @@ export default function OptimizedHRDDashboard({ user }: { user: any }) {
           : Array.isArray(result)
             ? result
             : []
+          
 
         const paginationData = result?.pagination || {
           total: formsData.length,
@@ -873,6 +876,22 @@ export default function OptimizedHRDDashboard({ user }: { user: any }) {
     [debouncedFilters, pagination.limit, getTimeFilterDates],
   )
 
+  const fetchStats = useCallback(async () => {
+  try {
+    const response = await fetch("/api/forms/stats")
+
+    if (!response.ok) {
+      throw new Error("Failed to fetch stats")
+    }
+
+    const result: DashboardStats = await response.json()
+
+    setStats(result)
+  } catch (err) {
+    console.error("Stats error:", err)
+  }
+}, [])
+
   const handleApprove = useCallback(
   async (formId: string) => {
     try {
@@ -891,7 +910,9 @@ export default function OptimizedHRDDashboard({ user }: { user: any }) {
 
       const result = await res.json()
       dashboardCache.clear()
+
 await fetchForms(pagination.page)
+await fetchStats()
 
 
       // 🔥 SATU-SATUNYA SOURCE OF TRUTH SETELAH APPROVE
@@ -1074,12 +1095,16 @@ await fetchForms(pagination.page)
   // ✅ FIXED: Effects with proper dependencies
   useEffect(() => {
   fetchForms(pagination.page, debouncedFilters)
+  fetchStats()
 }, [
   debouncedFilters.activeTab,
   debouncedFilters.timeFilter,
   debouncedFilters.selectedMonth,
   debouncedFilters.departmentFilter,
   debouncedFilters.requestTypeFilter,
+  pagination.page,
+  fetchForms,
+  fetchStats,
 ])
   
   return (

@@ -421,7 +421,59 @@ export default function LeaderDashboard({ user }: { user: any }) {
   const [selectedMonth, setSelectedMonth] = useState<{ month: number; year: number } | null>(null)
   const [requestTypeFilter, setRequestTypeFilter] = useState("all")
   const [departmentFilter, setDepartmentFilter] = useState("all")
-  const [allFormsForStats, setAllFormsForStats] = useState<Form[]>([])
+  interface DashboardStats {
+  total: number
+  pending: number
+  approved: number
+  rejected: number
+
+  totalLeave: number
+  totalOvertime: number
+  totalJobRequisition: number
+  totalTrainingRequest: number
+
+  pendingLeave: number
+  pendingOvertime: number
+  pendingJobRequisition: number
+  pendingTrainingRequest: number
+
+  approvedLeave: number
+  approvedOvertime: number
+  approvedJobRequisition: number
+  approvedTrainingRequest: number
+
+  rejectedLeave: number
+  rejectedOvertime: number
+  rejectedJobRequisition: number
+  rejectedTrainingRequest: number
+}
+
+const [stats, setStats] = useState<DashboardStats>({
+  total: 0,
+  pending: 0,
+  approved: 0,
+  rejected: 0,
+
+  totalLeave: 0,
+  totalOvertime: 0,
+  totalJobRequisition: 0,
+  totalTrainingRequest: 0,
+
+  pendingLeave: 0,
+  pendingOvertime: 0,
+  pendingJobRequisition: 0,
+  pendingTrainingRequest: 0,
+
+  approvedLeave: 0,
+  approvedOvertime: 0,
+  approvedJobRequisition: 0,
+  approvedTrainingRequest: 0,
+
+  rejectedLeave: 0,
+  rejectedOvertime: 0,
+  rejectedJobRequisition: 0,
+  rejectedTrainingRequest: 0,
+})
 
   const filterFormsByTimeRange = (forms: Form[]) => {
     if (timeFilter === "all") return forms
@@ -566,29 +618,55 @@ export default function LeaderDashboard({ user }: { user: any }) {
   )
 
   const fetchStats = useCallback(async () => {
-    try {
-      const statsParams = new URLSearchParams()
+  try {
+    const statsParams = new URLSearchParams()
 
-      // status filter (pending / approved / rejected)
-      if (activeTab !== "all") {
-        statsParams.append("status", activeTab)
-      }
-
-      const statsResponse = await fetch(`/api/forms/stats?${statsParams.toString()}`)
-
-      if (!statsResponse.ok) {
-        throw new Error(`HTTP error! status: ${statsResponse.status}`)
-      }
-
-      const statsResult = await statsResponse.json()
-
-      // Backend sudah return ARRAY langsung
-      setAllFormsForStats(Array.isArray(statsResult) ? statsResult : [])
-    } catch (error) {
-      console.error("Error fetching stats:", error)
-      setAllFormsForStats([])
+    if (activeTab !== "all") {
+      statsParams.append("status", activeTab)
     }
-  }, [activeTab])
+
+    const response = await fetch(
+      `/api/forms/stats?${statsParams.toString()}`
+    )
+
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`)
+    }
+
+    const result = await response.json()
+
+    setStats(result)
+  } catch (error) {
+    console.error("Error fetching stats:", error)
+
+    setStats({
+      total: 0,
+      pending: 0,
+      approved: 0,
+      rejected: 0,
+
+      totalLeave: 0,
+      totalOvertime: 0,
+      totalJobRequisition: 0,
+      totalTrainingRequest: 0,
+
+      pendingLeave: 0,
+      pendingOvertime: 0,
+      pendingJobRequisition: 0,
+      pendingTrainingRequest: 0,
+
+      approvedLeave: 0,
+      approvedOvertime: 0,
+      approvedJobRequisition: 0,
+      approvedTrainingRequest: 0,
+
+      rejectedLeave: 0,
+      rejectedOvertime: 0,
+      rejectedJobRequisition: 0,
+      rejectedTrainingRequest: 0,
+    })
+  }
+}, [activeTab])
 
   useEffect(() => {
     fetchForms()
@@ -737,61 +815,6 @@ export default function LeaderDashboard({ user }: { user: any }) {
     return pages
   }
 
-  const stats = useMemo(() => {
-    const formsArray = Array.isArray(allFormsForStats) ? allFormsForStats : []
-
-    const totalLeave = formsArray.filter((form) => form.type === "leave").length
-    const totalOvertime = formsArray.filter((form) => form.type === "overtime").length
-    const totalJobRequisition = formsArray.filter((form) => form.type === "job-requisition").length
-    const totalTrainingRequest = formsArray.filter((form) => form.type === "training-request").length
-    const pendingLeave = formsArray.filter((form) => form.type === "leave" && form.status === "pending").length
-    const pendingOvertime = formsArray.filter((form) => form.type === "overtime" && form.status === "pending").length
-    const pendingJobRequisition = formsArray.filter(
-      (form) => form.type === "job-requisition" && form.status === "pending",
-    ).length
-    const pendingTrainingRequest = formsArray.filter(
-      (form) => form.type === "training-request" && form.status === "pending",
-    ).length
-    const approvedLeave = formsArray.filter((form) => form.type === "leave" && form.status === "approved").length
-    const approvedOvertime = formsArray.filter((form) => form.type === "overtime" && form.status === "approved").length
-    const approvedJobRequisition = formsArray.filter(
-      (form) => form.type === "job-requisition" && form.status === "approved",
-    ).length
-    const approvedTrainingRequest = formsArray.filter(
-      (form) => form.type === "training-request" && form.status === "approved",
-    ).length
-    const rejectedLeave = formsArray.filter((form) => form.type === "leave" && form.status === "rejected").length
-    const rejectedOvertime = formsArray.filter((form) => form.type === "overtime" && form.status === "rejected").length
-    const rejectedJobRequisition = formsArray.filter(
-      (form) => form.type === "job-requisition" && form.status === "rejected",
-    ).length
-    const rejectedTrainingRequest = formsArray.filter(
-      (form) => form.type === "training-request" && form.status === "rejected",
-    ).length
-
-    return {
-      totalLeave,
-      totalOvertime,
-      totalJobRequisition,
-      totalTrainingRequest,
-      pendingLeave,
-      pendingOvertime,
-      pendingJobRequisition,
-      pendingTrainingRequest,
-      approvedLeave,
-      approvedOvertime,
-      approvedJobRequisition,
-      approvedTrainingRequest,
-      rejectedLeave,
-      rejectedOvertime,
-      rejectedJobRequisition,
-      rejectedTrainingRequest,
-      pendingLeavePercent: totalLeave ? Math.round((pendingLeave / totalLeave) * 100) : 0,
-      pendingOvertimePercent: totalOvertime ? Math.round((pendingOvertime / totalOvertime) * 100) : 0,
-      totalRequests: totalLeave + totalOvertime + totalJobRequisition + totalTrainingRequest,
-    }
-  }, [allFormsForStats])
-
   return (
     <div className="min-h-screen bg-teal-50/50 dark:bg-slate-900">
       <DashboardHeader user={user} />
@@ -857,72 +880,107 @@ export default function LeaderDashboard({ user }: { user: any }) {
             <CardHeader className="pb-2">
               <CardTitle className="text-sm font-medium text-muted-foreground">Pending Requests</CardTitle>
             </CardHeader>
-            <CardContent className="relative overflow-hidden">
-              <div className="absolute -right-6 -top-6 w-24 h-24 rounded-full bg-gradient-to-br from-teal-100/40 to-cyan-100/40 dark:from-teal-900/10 dark:to-cyan-900/10 z-0"></div>
-              <div className="flex justify-between items-end">
-                <div className="text-2xl font-bold">
-                  {stats.pendingLeave +
-                    stats.pendingOvertime +
-                    stats.pendingJobRequisition +
-                    stats.pendingTrainingRequest}
-                </div>
-                <Badge
-                  variant="outline"
-                  className="bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-900/20 dark:text-amber-300 dark:border-amber-800"
-                >
-                  <AlertCircle className="h-3.5 w-3.5 mr-1" />
-                  Needs Action
-                </Badge>
-              </div>
-              <div className="mt-4 space-y-2">
-                <div className="flex justify-between text-xs">
-                  <span>Leave ({stats.pendingLeave})</span>
-                  <span>{stats.pendingLeavePercent}%</span>
-                </div>
-                <Progress value={stats.pendingLeavePercent} className="h-1.5 bg-slate-100 dark:bg-slate-700" />
-                <div className="flex justify-between text-xs">
-                  <span>Overtime ({stats.pendingOvertime})</span>
-                  <span>{stats.pendingOvertimePercent}%</span>
-                </div>
-                <Progress value={stats.pendingOvertimePercent} className="h-1.5 bg-slate-100 dark:bg-slate-700" />
-                <div className="flex justify-between text-xs">
-                  <span>Job Req ({stats.pendingJobRequisition})</span>
-                  <span>
-                    {stats.totalJobRequisition
-                      ? Math.round((stats.pendingJobRequisition / stats.totalJobRequisition) * 100)
-                      : 0}
-                    %
-                  </span>
-                </div>
-                <Progress
-                  value={
-                    stats.totalJobRequisition
-                      ? Math.round((stats.pendingJobRequisition / stats.totalJobRequisition) * 100)
-                      : 0
-                  }
-                  className="h-1.5 bg-slate-100 dark:bg-slate-700"
-                />
-                <div className="flex justify-between text-xs">
-                  <span>Training ({stats.pendingTrainingRequest})</span>
-                  <span>
-                    {stats.totalTrainingRequest
-                      ? Math.round((stats.pendingTrainingRequest / stats.totalTrainingRequest) * 100)
-                      : 0}
-                    %
-                  </span>
-                </div>
-                <Progress
-                  value={
-                    stats.totalTrainingRequest
-                      ? Math.round((stats.pendingTrainingRequest / stats.totalTrainingRequest) * 100)
-                      : 0
-                  }
-                  className="h-1.5 bg-slate-100 dark:bg-slate-700"
-                />
-              </div>
-            </CardContent>
-          </Card>
+           <CardContent className="relative overflow-hidden">
+  <div className="absolute -right-6 -top-6 w-24 h-24 rounded-full bg-gradient-to-br from-teal-100/40 to-cyan-100/40 dark:from-teal-900/10 dark:to-cyan-900/10 z-0"></div>
 
+  <div className="flex justify-between items-end">
+    <div className="text-2xl font-bold">
+      {stats.pendingLeave +
+        stats.pendingOvertime +
+        stats.pendingJobRequisition +
+        stats.pendingTrainingRequest}
+    </div>
+
+    <Badge
+      variant="outline"
+      className="bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-900/20 dark:text-amber-300 dark:border-amber-800"
+    >
+      <AlertCircle className="h-3.5 w-3.5 mr-1" />
+      Needs Action
+    </Badge>
+  </div>
+
+  <div className="mt-4 space-y-2">
+
+    <div className="flex justify-between text-xs">
+      <span>Leave ({stats.pendingLeave})</span>
+      <span>
+        {stats.totalLeave
+          ? Math.round((stats.pendingLeave / stats.totalLeave) * 100)
+          : 0}
+        %
+      </span>
+    </div>
+
+    <Progress
+      value={
+        stats.totalLeave
+          ? Math.round((stats.pendingLeave / stats.totalLeave) * 100)
+          : 0
+      }
+      className="h-1.5 bg-slate-100 dark:bg-slate-700"
+    />
+
+    <div className="flex justify-between text-xs">
+      <span>Overtime ({stats.pendingOvertime})</span>
+      <span>
+        {stats.totalOvertime
+          ? Math.round((stats.pendingOvertime / stats.totalOvertime) * 100)
+          : 0}
+        %
+      </span>
+    </div>
+
+    <Progress
+      value={
+        stats.totalOvertime
+          ? Math.round((stats.pendingOvertime / stats.totalOvertime) * 100)
+          : 0
+      }
+      className="h-1.5 bg-slate-100 dark:bg-slate-700"
+    />
+
+    <div className="flex justify-between text-xs">
+      <span>Job Req ({stats.pendingJobRequisition})</span>
+      <span>
+        {stats.totalJobRequisition
+          ? Math.round((stats.pendingJobRequisition / stats.totalJobRequisition) * 100)
+          : 0}
+        %
+      </span>
+    </div>
+
+    <Progress
+      value={
+        stats.totalJobRequisition
+          ? Math.round((stats.pendingJobRequisition / stats.totalJobRequisition) * 100)
+          : 0
+      }
+      className="h-1.5 bg-slate-100 dark:bg-slate-700"
+    />
+
+    <div className="flex justify-between text-xs">
+      <span>Training ({stats.pendingTrainingRequest})</span>
+      <span>
+        {stats.totalTrainingRequest
+          ? Math.round((stats.pendingTrainingRequest / stats.totalTrainingRequest) * 100)
+          : 0}
+        %
+      </span>
+    </div>
+
+    <Progress
+      value={
+        stats.totalTrainingRequest
+          ? Math.round((stats.pendingTrainingRequest / stats.totalTrainingRequest) * 100)
+          : 0
+      }
+      className="h-1.5 bg-slate-100 dark:bg-slate-700"
+    />
+
+  </div>
+</CardContent>
+</Card>
           <Card className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
             <CardHeader className="pb-2">
               <CardTitle className="text-sm font-medium text-muted-foreground">Approved Requests</CardTitle>

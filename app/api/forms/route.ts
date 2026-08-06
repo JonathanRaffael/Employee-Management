@@ -798,13 +798,23 @@ export async function GET(request: Request) {
     }
 
     if (selectedMonth) {
-      const startDate = new Date(selectedMonth.year, selectedMonth.month, 1)
-      const endDate = new Date(selectedMonth.year, selectedMonth.month + 1, 0)
-      whereClause.createdAt = {
-        gte: startDate,
-        lte: endDate,
-      }
-    } else if (timeFilter && timeFilter !== "all") {
+  const startDate = new Date(
+    Date.UTC(selectedMonth.year, selectedMonth.month, 1)
+  )
+
+  const endDate = new Date(
+    Date.UTC(selectedMonth.year, selectedMonth.month + 1, 1)
+  )
+
+  whereClause.createdAt = {
+    gte: startDate,
+    lt: endDate,
+  }
+
+  console.log("START =", startDate)
+  console.log("END   =", endDate)
+
+} else if (timeFilter && timeFilter !== "all") {
       const { start, end } = getTimeFilterDates(timeFilter)
       whereClause.createdAt = {
         gte: start,
@@ -813,6 +823,12 @@ export async function GET(request: Request) {
     } else {
       const startDate = searchParams.get("startDate")
       const endDate = searchParams.get("endDate")
+
+      console.log({
+  selectedMonth: selectedMonthStr,
+  startDate,
+  endDate,
+})
 
       if (startDate && endDate) {
         whereClause.createdAt = {
@@ -976,6 +992,8 @@ export async function GET(request: Request) {
       }
     }
 
+    console.log(whereClause)
+
     const forms = await prisma.form.findMany({
       where: whereClause,
       select: selectClause,
@@ -1037,6 +1055,7 @@ export async function DELETE(request: Request) {
 
   try {
     const { searchParams } = new URL(request.url)
+    console.log("REQUEST URL =", request.url)
     const formId = searchParams.get("id")
 
     if (!formId) {
@@ -1178,14 +1197,19 @@ async function handleExport(forms: any[], format: string, selectedMonth: { month
       const whereClause: any = {}
 
       if (selectedMonth) {
-        const startDate = new Date(selectedMonth.year, selectedMonth.month, 1)
-        const endDate = new Date(selectedMonth.year, selectedMonth.month + 1, 0)
-        whereClause.createdAt = {
-          gte: startDate,
-          lte: endDate,
-        }
-      }
+  const startDate = new Date(
+    Date.UTC(selectedMonth.year, selectedMonth.month, 1)
+  )
 
+  const endDate = new Date(
+    Date.UTC(selectedMonth.year, selectedMonth.month + 1, 1)
+  )
+
+  whereClause.createdAt = {
+    gte: startDate,
+    lt: endDate, // gunakan lt, bukan lte
+  }
+}
       forms = await prisma.form.findMany({
         where: whereClause,
         select: {

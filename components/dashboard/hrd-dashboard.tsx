@@ -799,11 +799,14 @@ const [stats, setStats] = useState<DashboardStats>({
 }
 
         if (currentFilters.selectedMonth) {
-          const startDate = new Date(currentFilters.selectedMonth.year, currentFilters.selectedMonth.month, 1)
-          const endDate = new Date(currentFilters.selectedMonth.year, currentFilters.selectedMonth.month + 1, 0)
-          params.append("startDate", startDate.toISOString())
-          params.append("endDate", endDate.toISOString())
-        } else if (currentFilters.timeFilter !== "all") {
+  params.append(
+    "selectedMonth",
+    JSON.stringify({
+      month: currentFilters.selectedMonth.month,
+      year: currentFilters.selectedMonth.year,
+    })
+  )
+} else if (currentFilters.timeFilter !== "all") {
           const { start, end } = getTimeFilterDates(currentFilters.timeFilter)
           params.append("startDate", start.toISOString())
           params.append("endDate", end.toISOString())

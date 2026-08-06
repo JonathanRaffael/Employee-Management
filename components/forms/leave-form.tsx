@@ -1127,7 +1127,7 @@ export default function LeaveFormComponent({ user }: LeaveFormProps) {
                                     filteredEmployees.map((employee) => (
                                       <CommandItem
                                         key={employee.id}
-                                        value={employee.id}
+                                        value={`${employee.name} ${employee.employeeCode} ${employee.department ?? ""} ${employee.position ?? ""}`}
                                         onSelect={() => {
                                           handleEmployeeSelect(employee)
                                         }}

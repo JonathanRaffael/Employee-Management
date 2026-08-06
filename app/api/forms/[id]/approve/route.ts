@@ -156,10 +156,10 @@ export async function PATCH(
 
       // 🔒 FINAL DECISION — KUNCI STATUS FORM
       return tx.form.update({
-        where: { id },
-        data: { status: "approved" },
-        include: { approvals: true },
-      })
+  where: { id },
+  data: { status: "APPROVED" },   // ✅ BENAR
+  include: { approvals: true },
+})
     })
 
     // invalidate cache dashboard

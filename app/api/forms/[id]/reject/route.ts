@@ -42,10 +42,20 @@ export async function POST(
       })
 
       if (!form) throw new Error("Form not found")
-      if (form.status === "approved") throw new Error("Approved form cannot be rejected")
-      if (form.status === "rejected") throw new Error("Form already rejected")
 
-      if (userRole === "supervisor" && form.type !== "overtime") {
+      // Konsisten menggunakan UPPERCASE
+      if (form.status === "APPROVED") {
+        throw new Error("Approved form cannot be rejected")
+      }
+
+      if (form.status === "REJECTED") {
+        throw new Error("Form already rejected")
+      }
+
+      if (
+        userRole === "supervisor" &&
+        form.type.toLowerCase() !== "overtime"
+      ) {
         throw new Error("Supervisor can only reject overtime forms")
       }
 
@@ -53,7 +63,7 @@ export async function POST(
         (a) => a.role.toLowerCase() === userRole
       )
 
-      if (existingApproval?.status === "approved") {
+      if (existingApproval?.status === "APPROVED") {
         throw new Error("Final approval cannot be rejected")
       }
 
@@ -61,7 +71,7 @@ export async function POST(
         await tx.approval.update({
           where: { id: existingApproval.id },
           data: {
-            status: "rejected",
+            status: "REJECTED",
             approverId,
             comments: reason,
           },
@@ -71,17 +81,20 @@ export async function POST(
           data: {
             formId,
             role: userRole,
-            status: "rejected",
+            status: "REJECTED",
             approverId,
             comments: reason,
           },
         })
       }
 
+      // Final reject oleh HRD/Admin
       if (FINAL_REJECT_ROLES.includes(userRole)) {
         await tx.form.update({
           where: { id: formId },
-          data: { status: "rejected" },
+          data: {
+            status: "REJECTED",
+          },
         })
       }
 
@@ -91,7 +104,11 @@ export async function POST(
           approvals: {
             include: {
               approver: {
-                select: { id: true, name: true, role: true },
+                select: {
+                  id: true,
+                  name: true,
+                  role: true,
+                },
               },
             },
           },
@@ -113,8 +130,12 @@ export async function POST(
     })
   } catch (error: any) {
     return NextResponse.json(
-      { error: error.message ?? "Reject failed" },
-      { status: 400 }
+      {
+        error: error.message ?? "Reject failed",
+      },
+      {
+        status: 400,
+      }
     )
   }
 }

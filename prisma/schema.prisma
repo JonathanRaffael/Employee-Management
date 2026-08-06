@@ -7,97 +7,70 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-//////////////////////////////////////////////////////
-// USER (LOGIN ACCOUNT)
-//////////////////////////////////////////////////////
-
 model User {
-  id         String   @id @default(cuid())
-  name       String?
-  email      String   @unique
-  password   String?
-  role       String?
-  department String?
-  position   String?
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
-
+  id            String         @id @default(cuid())
+  name          String?
+  email         String         @unique
+  password      String?
+  role          String?
+  department    String?
+  position      String?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
   approvals     Approval[]     @relation("ApproverApprovals")
-  createdForms Form[]         @relation("FormCreator")
-  notifications Notification[]
   employee      Employee?
+  createdForms  Form[]         @relation("FormCreator")
+  notifications Notification[]
 
   @@index([role])
   @@index([department])
 }
 
-//////////////////////////////////////////////////////
-// EMPLOYEE (NON LOGIN ENTITY)
-//////////////////////////////////////////////////////
-
 model Employee {
-  id           String   @id @default(cuid())
-  userId       String?  @unique
-  employeeCode String
-  name         String
-  department   String
-  position     String
-  isActive     Boolean  @default(true)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
-
+  id            String         @id @default(cuid())
+  userId        String?        @unique
+  employeeCode  String
+  name          String
+  department    String
+  position      String
+  isActive      Boolean        @default(true)
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
   user          User?          @relation(fields: [userId], references: [id])
-  leaveBalances LeaveBalance[]
   forms         Form[]
+  leaveBalances LeaveBalance[]
 
   @@index([employeeCode])
   @@index([department])
 }
 
-//////////////////////////////////////////////////////
-// LEAVE BALANCE
-//////////////////////////////////////////////////////
-
 model LeaveBalance {
-  id         String @id @default(cuid())
+  id         String   @id @default(cuid())
   employeeId String
   year       Int
   total      Int
-  used       Int    @default(0)
-
-  employee Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  used       Int      @default(0)
+  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
 
   @@unique([employeeId, year])
 }
 
-//////////////////////////////////////////////////////
-// FORM (NO APPROVAL LOGIC HERE)
-//////////////////////////////////////////////////////
-
 model Form {
-  id         String   @id @default(cuid())
-  type       String
-  status     String
-  data       Json?
-
-  // employee yang diajukan
-  employeeId String
-  employee   Employee @relation(fields: [employeeId], references: [id])
-
-  // user pembuat form (leader / employee login)
-  createdById String
-  createdBy   User   @relation("FormCreator", fields: [createdById], references: [id])
-
+  id                  String               @id @default(cuid())
+  type                String
+  status              String
+  data                Json?
+  employeeId          String
   supportingDocuments String[]
   formNumber          Int?
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  approvals Approval[]
-
-  jobRequisition  JobRequisitionForm?
-  trainingRequest TrainingRequestForm?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  createdById         String
+  approvals           Approval[]
+  createdBy           User                 @relation("FormCreator", fields: [createdById], references: [id])
+  employee            Employee             @relation(fields: [employeeId], references: [id])
+  jobRequisition      JobRequisitionForm?
+  trainingRequest     TrainingRequestForm?
 
   @@unique([type, formNumber])
   @@index([status])
@@ -106,34 +79,25 @@ model Form {
   @@index([createdById])
 }
 
-//////////////////////////////////////////////////////
-// APPROVAL = SINGLE SOURCE OF TRUTH
-//////////////////////////////////////////////////////
-
 model Approval {
-  id         String   @id @default(cuid())
+  id         String    @id @default(cuid())
   formId     String
   role       String
-  status     String   // PENDING | APPROVED | REJECTED
+  status     String
   approverId String?
   signature  String?
   comments   String?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
   approvedAt DateTime?
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
-
-  approver User? @relation("ApproverApprovals", fields: [approverId], references: [id])
-  form     Form  @relation(fields: [formId], references: [id], onDelete: Cascade)
+  approver   User?     @relation("ApproverApprovals", fields: [approverId], references: [id])
+  form       Form      @relation(fields: [formId], references: [id], onDelete: Cascade)
 
   @@unique([formId, role])
   @@index([formId])
   @@index([role])
   @@index([status])
 }
-
-//////////////////////////////////////////////////////
-// NOTIFICATION
-//////////////////////////////////////////////////////
 
 model Notification {
   id        String   @id @default(cuid())
@@ -142,15 +106,10 @@ model Notification {
   isRead    Boolean  @default(false)
   createdAt DateTime @default(now())
   userId    String
-
-  user User @relation(fields: [userId], references: [id])
+  user      User     @relation(fields: [userId], references: [id])
 
   @@index([userId])
 }
-
-//////////////////////////////////////////////////////
-// JOB REQUISITION
-//////////////////////////////////////////////////////
 
 model JobRequisitionForm {
   formId            String               @id
@@ -165,16 +124,11 @@ model JobRequisitionForm {
   salaryRange       String?
   budgetStatus      BudgetStatus
   remarks           String?
-
-  form Form @relation(fields: [formId], references: [id], onDelete: Cascade)
+  form              Form                 @relation(fields: [formId], references: [id], onDelete: Cascade)
 }
 
-//////////////////////////////////////////////////////
-// TRAINING REQUEST
-//////////////////////////////////////////////////////
-
 model TrainingRequestForm {
-  formId                 String @id
+  formId                 String            @id
   fullName               String
   employeeCode           String?
   departmentName         String?
@@ -187,7 +141,7 @@ model TrainingRequestForm {
   trainingLocation       String?
   trainingMode           TrainingMode?
   trainingDuration       String?
-  accommodationRequired  Boolean @default(false)
+  accommodationRequired  Boolean           @default(false)
   checkInDate            DateTime?
   nights                 Int?
   preferredAccommodation String?
@@ -195,13 +149,8 @@ model TrainingRequestForm {
   employeeCategory       EmployeeCategory?
   hrStatus               String?
   hrComments             String?
-
-  form Form @relation(fields: [formId], references: [id], onDelete: Cascade)
+  form                   Form              @relation(fields: [formId], references: [id], onDelete: Cascade)
 }
-
-//////////////////////////////////////////////////////
-// ENUMS
-//////////////////////////////////////////////////////
 
 enum EmploymentType {
   PART_TIME

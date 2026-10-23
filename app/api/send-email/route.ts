@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server"
 import nodemailer from "nodemailer"
+import type { Transporter, SendMailOptions } from "nodemailer"
 import { getServerSession } from "next-auth"
 import { authOptions } from "@/lib/auth"
 
@@ -19,9 +20,9 @@ const ALLOWED_ROLES = ["admin", "hrd", "leader"]
 /* ======================
    TRANSPORTER (SINGLETON)
 ====================== */
-let transporter: nodemailer.Transporter | null = null
+let transporter: Transporter | null = null
 
-function getTransporter(): nodemailer.Transporter {
+function getTransporter(): Transporter {
   if (!transporter) {
     if (!process.env.SMTP_USER || !process.env.SMTP_PASSWORD) {
       throw new Error("SMTP credentials not configured")
@@ -102,7 +103,7 @@ export async function POST(req: Request) {
     const ccList = cc ? normalizeEmails(cc) : undefined
     const bccList = bcc ? normalizeEmails(bcc) : undefined
 
-    const mailOptions: nodemailer.SendMailOptions = {
+    const mailOptions: SendMailOptions = {
       from: `PT. Hang Tong Manufactory <${process.env.SMTP_USER}>`,
       to: toList,
       subject,

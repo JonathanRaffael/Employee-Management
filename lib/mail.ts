@@ -1,5 +1,5 @@
-// lib/mail.ts
 import nodemailer from "nodemailer"
+import type { Transporter } from "nodemailer"
 import type Mail from "nodemailer/lib/mailer"
 
 interface SendMailOptions {
@@ -11,7 +11,7 @@ interface SendMailOptions {
 }
 
 // Singleton transporter
-let transporter: nodemailer.Transporter | null = null
+let transporter: Transporter | null = null
 
 function getTransporter() {
   if (!transporter) {

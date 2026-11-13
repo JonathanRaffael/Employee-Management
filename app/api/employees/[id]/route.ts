@@ -1,9 +1,18 @@
 
 import { NextResponse, type NextRequest } from "next/server"
+import { getServerSession } from "next-auth"
+import { authOptions } from "@/lib/auth"
 import { prisma } from "@/lib/prisma"
 
 type RouteContext = {
   params: Promise<{ id: string }>
+}
+
+interface CustomSession {
+  user: {
+    id: string
+    role: string
+  }
 }
 
 type EmployeePatchBody = {
@@ -34,7 +43,13 @@ function errorResponse(message: string, status: number) {
   return NextResponse.json({ error: message }, { status })
 }
 
+const normalizeRole = (role?: string | null) =>
+  role?.toUpperCase() ?? ""
+
+// ========================================
 // GET EMPLOYEE DETAIL + LEAVE BALANCE
+// ========================================
+
 export async function GET(
   _req: NextRequest,
   context: RouteContext
@@ -83,7 +98,10 @@ export async function GET(
   }
 }
 
+// ========================================
 // PATCH EMPLOYEE + LEAVE BALANCE + STATUS
+// ========================================
+
 export async function PATCH(
   req: NextRequest,
   context: RouteContext
@@ -97,7 +115,6 @@ export async function PATCH(
       return errorResponse("Invalid request body", 400)
     }
 
-    // Check employee existence
     const existingEmployee = await prisma.employee.findUnique({
       where: { id },
       select: { id: true },
@@ -148,7 +165,7 @@ export async function PATCH(
       employeeData.isActive = body.isActive
     }
 
-    // Validate leave payload
+    // Validate leave balance
     let leaveInput: {
       year: number
       total: number
@@ -294,6 +311,130 @@ export async function PATCH(
 
     return errorResponse(
       "Failed to update employee information",
+      500
+    )
+  }
+}
+
+// ========================================
+// DELETE EMPLOYEE
+// ADMIN & HRD ONLY
+// ========================================
+
+export async function DELETE(
+  _req: NextRequest,
+  context: RouteContext
+) {
+  try {
+    const session = (await getServerSession(
+      authOptions
+    )) as CustomSession | null
+
+    const role = normalizeRole(session?.user?.role)
+
+    if (!session || !["ADMIN", "HRD"].includes(role)) {
+      return errorResponse("Forbidden", 403)
+    }
+
+    const { id } = await context.params
+
+    const employee = await prisma.employee.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        name: true,
+        employeeCode: true,
+        _count: {
+          select: {
+            forms: true,
+            leaveTransactions: true,
+          },
+        },
+      },
+    })
+
+    if (!employee) {
+      return errorResponse("Employee not found", 404)
+    }
+
+    // Protect historical records
+    if (
+      employee._count.forms > 0 ||
+      employee._count.leaveTransactions > 0
+    ) {
+      return NextResponse.json(
+        {
+          error:
+            "Employee has historical forms or leave transactions. Deactivate instead of deleting.",
+          relatedForms: employee._count.forms,
+          relatedLeaveTransactions:
+            employee._count.leaveTransactions,
+        },
+        { status: 409 }
+      )
+    }
+
+    // Delete employee and related leave balances atomically
+    await prisma.$transaction(async (tx) => {
+      // Recheck historical relations before deletion
+      const currentEmployee = await tx.employee.findUnique({
+        where: { id },
+        select: {
+          _count: {
+            select: {
+              forms: true,
+              leaveTransactions: true,
+            },
+          },
+        },
+      })
+
+      if (!currentEmployee) {
+        throw new Error("Employee not found")
+      }
+
+      if (
+        currentEmployee._count.forms > 0 ||
+        currentEmployee._count.leaveTransactions > 0
+      ) {
+        throw new Error(
+          "Employee has historical records and cannot be deleted"
+        )
+      }
+
+      await tx.employee.delete({
+        where: { id },
+      })
+    })
+
+    return NextResponse.json({
+      success: true,
+      message: `Employee ${employee.name} deleted successfully`,
+      deletedEmployee: {
+        id: employee.id,
+        employeeCode: employee.employeeCode,
+        name: employee.name,
+      },
+    })
+  } catch (error) {
+    console.error("[DELETE EMPLOYEE]", error)
+
+    if (
+      error instanceof Error &&
+      error.message === "Employee not found"
+    ) {
+      return errorResponse("Employee not found", 404)
+    }
+
+    if (
+      error instanceof Error &&
+      error.message.includes("historical")
+    ) {
+      return errorResponse(error.message, 409)
+    }
+
+    return errorResponse(
+      "Failed to delete employee",
       500
     )
   }

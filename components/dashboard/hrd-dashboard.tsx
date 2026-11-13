@@ -1121,11 +1121,21 @@ await fetchStats()
       <DashboardHeader user={user} />
 
       <main className="container mx-auto py-8 px-4">
-        <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-8">
+        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-8">
           <div>
             <h1 className="text-3xl font-bold text-slate-800 dark:text-slate-100">HRD Dashboard</h1>
             <p className="text-muted-foreground mt-1">Review and approve employee requests</p>
           </div>
+
+          <Button
+            type="button"
+            onClick={() => router.push("/dashboard/hrd/employees")}
+            className="bg-teal-600 hover:bg-teal-700 text-white shadow-sm"
+          >
+            <Users className="h-4 w-4 mr-2" />
+            Employee Management
+            <ArrowRight className="h-4 w-4 ml-2" />
+          </Button>
         </div>
 
         {/* ✅ Stats Overview with memoized data */}

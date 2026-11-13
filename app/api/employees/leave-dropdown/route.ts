@@ -1,3 +1,4 @@
+
 import { NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
 
@@ -32,8 +33,10 @@ export async function GET() {
 
   const result = employees.map(e => {
     const balance = balanceMap.get(e.id)
-    const total = balance?.total ?? 0
-    const used = balance?.used ?? 0
+
+    // Konversi Prisma.Decimal menjadi number
+    const total = Number(balance?.total ?? 0)
+    const used = Number(balance?.used ?? 0)
 
     return {
       id: e.id,

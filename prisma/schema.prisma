@@ -8,69 +8,100 @@ datasource db {
 }
 
 model User {
-  id            String         @id @default(cuid())
-  name          String?
-  email         String         @unique
-  password      String?
-  role          String?
-  department    String?
-  position      String?
-  createdAt     DateTime       @default(now())
-  updatedAt     DateTime       @updatedAt
-  approvals     Approval[]     @relation("ApproverApprovals")
-  employee      Employee?
-  createdForms  Form[]         @relation("FormCreator")
-  notifications Notification[]
+  id         String   @id @default(cuid())
+  name       String?
+  email      String   @unique
+  password   String?
+  role       String?
+  department String?
+  position   String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  approvals                Approval[]         @relation("ApproverApprovals")
+  employee                 Employee?
+  createdForms             Form[]             @relation("FormCreator")
+  notifications            Notification[]
+  leaveTransactionsCreated LeaveTransaction[] @relation("LeaveTransactionCreator")
 
   @@index([role])
   @@index([department])
 }
 
 model Employee {
-  id            String         @id @default(cuid())
-  userId        String?        @unique
-  employeeCode  String
-  name          String
-  department    String
-  position      String
-  isActive      Boolean        @default(true)
-  createdAt     DateTime       @default(now())
-  updatedAt     DateTime       @updatedAt
-  user          User?          @relation(fields: [userId], references: [id])
-  forms         Form[]
-  leaveBalances LeaveBalance[]
+  id           String   @id @default(cuid())
+  userId       String?  @unique
+  employeeCode String
+  name         String
+  department   String
+  position     String
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user              User?              @relation(fields: [userId], references: [id])
+  forms             Form[]
+  leaveBalances     LeaveBalance[]
+  leaveTransactions LeaveTransaction[]
 
   @@index([employeeCode])
   @@index([department])
 }
 
 model LeaveBalance {
-  id         String   @id @default(cuid())
+  id         String  @id @default(cuid())
   employeeId String
   year       Int
-  total      Int
-  used       Int      @default(0)
-  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  total      Decimal @default(0) @db.Decimal(8, 2)
+  used       Decimal @default(0) @db.Decimal(8, 2)
+
+  employee     Employee           @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  transactions LeaveTransaction[]
 
   @@unique([employeeId, year])
+  @@index([year])
+}
+
+model LeaveTransaction {
+  id          String               @id @default(cuid())
+  balanceId   String
+  employeeId  String
+  type        LeaveTransactionType
+  amount      Int
+  description String?
+  formId      String?              @unique
+  createdById String
+  createdAt   DateTime             @default(now())
+
+  balance   LeaveBalance @relation(fields: [balanceId], references: [id], onDelete: Cascade)
+  employee  Employee     @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  form      Form?        @relation(fields: [formId], references: [id], onDelete: SetNull)
+  createdBy User         @relation("LeaveTransactionCreator", fields: [createdById], references: [id])
+
+  @@index([employeeId, createdAt])
+  @@index([balanceId, createdAt])
+  @@index([createdById])
+  @@index([type])
 }
 
 model Form {
-  id                  String               @id @default(cuid())
+  id                  String   @id @default(cuid())
   type                String
   status              String
   data                Json?
   employeeId          String
   supportingDocuments String[]
   formNumber          Int?
-  createdAt           DateTime             @default(now())
-  updatedAt           DateTime             @updatedAt
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
   createdById         String
-  approvals           Approval[]
-  createdBy           User                 @relation("FormCreator", fields: [createdById], references: [id])
-  employee            Employee             @relation(fields: [employeeId], references: [id])
-  jobRequisition      JobRequisitionForm?
-  trainingRequest     TrainingRequestForm?
+
+  approvals        Approval[]
+  createdBy        User                 @relation("FormCreator", fields: [createdById], references: [id])
+  employee         Employee             @relation(fields: [employeeId], references: [id])
+  jobRequisition   JobRequisitionForm?
+  trainingRequest  TrainingRequestForm?
+  leaveTransaction LeaveTransaction?
 
   @@unique([type, formNumber])
   @@index([status])
@@ -90,8 +121,9 @@ model Approval {
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
   approvedAt DateTime?
-  approver   User?     @relation("ApproverApprovals", fields: [approverId], references: [id])
-  form       Form      @relation(fields: [formId], references: [id], onDelete: Cascade)
+
+  approver User? @relation("ApproverApprovals", fields: [approverId], references: [id])
+  form     Form  @relation(fields: [formId], references: [id], onDelete: Cascade)
 
   @@unique([formId, role])
   @@index([formId])
@@ -106,7 +138,8 @@ model Notification {
   isRead    Boolean  @default(false)
   createdAt DateTime @default(now())
   userId    String
-  user      User     @relation(fields: [userId], references: [id])
+
+  user User @relation(fields: [userId], references: [id])
 
   @@index([userId])
 }
@@ -124,7 +157,8 @@ model JobRequisitionForm {
   salaryRange       String?
   budgetStatus      BudgetStatus
   remarks           String?
-  form              Form                 @relation(fields: [formId], references: [id], onDelete: Cascade)
+
+  form Form @relation(fields: [formId], references: [id], onDelete: Cascade)
 }
 
 model TrainingRequestForm {
@@ -149,7 +183,15 @@ model TrainingRequestForm {
   employeeCategory       EmployeeCategory?
   hrStatus               String?
   hrComments             String?
-  form                   Form              @relation(fields: [formId], references: [id], onDelete: Cascade)
+
+  form Form @relation(fields: [formId], references: [id], onDelete: Cascade)
+}
+
+enum LeaveTransactionType {
+  ALLOCATION
+  ADJUSTMENT
+  DEDUCTION
+  REVERSAL
 }
 
 enum EmploymentType {

@@ -84,8 +84,10 @@ export async function GET(
   })
 }
 
+
 /* =========================
    PATCH — HRD FINAL APPROVAL
+   WITH AUTOMATIC LEAVE DEDUCTION
 ========================= */
 export async function PATCH(
   req: NextRequest,
@@ -98,7 +100,18 @@ export async function PATCH(
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 
-  const { signature, comments } = await req.json()
+  let body: { signature?: string; comments?: string }
+
+  try {
+    body = await req.json()
+  } catch {
+    return NextResponse.json(
+      { error: "Invalid request body" },
+      { status: 400 }
+    )
+  }
+
+  const { signature, comments } = body
 
   if (!signature) {
     return NextResponse.json(
@@ -109,6 +122,7 @@ export async function PATCH(
 
   try {
     const result = await prisma.$transaction(async (tx) => {
+      // 1. Ambil data form
       const form = await tx.form.findUnique({
         where: { id },
         include: { approvals: true },
@@ -118,12 +132,11 @@ export async function PATCH(
         throw new Error("Form not found")
       }
 
-      // form sudah final → stop
       if (["APPROVED", "REJECTED"].includes(normalize(form.status))) {
         throw new Error("Form already finalized")
       }
 
-      // cari / buat approval HRD
+      // 2. Cari atau buat approval HRD
       let hrdApproval = form.approvals.find(
         (a) => normalize(a.role) === "HRD"
       )
@@ -142,7 +155,118 @@ export async function PATCH(
         throw new Error("HRD already finalized")
       }
 
-      // update approval HRD
+      // 3. Proses pemotongan saldo khusus Annual Leave
+      const isLeaveForm = normalize(form.type) === "LEAVE"
+      const leaveData = (form.data ?? {}) as Record<string, any>
+
+      const isAnnualLeave =
+        isLeaveForm &&
+        String(leaveData.leaveType ?? "").trim().toLowerCase() ===
+          "annual leave"
+
+      let deductionAmount = 0
+      let balanceId: string | null = null
+
+      if (isAnnualLeave) {
+        if (!form.employeeId) {
+          throw new Error("Employee not found on leave form")
+        }
+
+        // Setengah hari selalu dihitung 0.5
+        deductionAmount = leaveData.isHalfDay
+          ? 0.5
+          : Number(leaveData.jumlahHari ?? leaveData.totalDays)
+
+        if (
+          !Number.isFinite(deductionAmount) ||
+          deductionAmount <= 0
+        ) {
+          throw new Error("Invalid annual leave duration")
+        }
+
+        // Tentukan tahun saldo berdasarkan tanggal pengajuan
+        const dateValues: string[] =
+          Array.isArray(leaveData.manualDates) &&
+          leaveData.manualDates.length > 0
+            ? leaveData.manualDates
+            : [leaveData.startDate, leaveData.endDate].filter(Boolean)
+
+        if (dateValues.length === 0) {
+          throw new Error("Leave dates are required")
+        }
+
+        const leaveDates = dateValues.map((value) => new Date(value))
+
+        if (leaveDates.some((date) => Number.isNaN(date.getTime()))) {
+          throw new Error("Invalid leave date")
+        }
+
+        const leaveYear = leaveDates[0].getUTCFullYear()
+
+        // Untuk sementara, satu pengajuan harus berada dalam satu tahun kalender
+        if (
+          leaveDates.some((date) => date.getUTCFullYear() !== leaveYear)
+        ) {
+          throw new Error(
+            "Annual Leave spanning multiple calendar years is not supported"
+          )
+        }
+
+        // 4. Ambil saldo karyawan
+        const balance = await tx.leaveBalance.findUnique({
+          where: {
+            employeeId_year: {
+              employeeId: form.employeeId,
+              year: leaveYear,
+            },
+          },
+        })
+
+        if (!balance) {
+          throw new Error(
+            `Leave balance for year ${leaveYear} was not found`
+          )
+        }
+
+        const total = Number(balance.total)
+        const used = Number(balance.used)
+        const remaining = total - used
+
+        if (remaining < deductionAmount) {
+          throw new Error(
+            `Insufficient annual leave balance. Remaining: ${remaining} days, requested: ${deductionAmount} days`
+          )
+        }
+
+        balanceId = balance.id
+
+        // 5. Catat transaksi pemotongan
+        // formId bersifat UNIQUE sehingga satu form tidak bisa
+        // menghasilkan dua transaksi deduction.
+        await tx.leaveTransaction.create({
+          data: {
+            balanceId: balance.id,
+            employeeId: form.employeeId,
+            type: "DEDUCTION",
+            amount: deductionAmount,
+            description: `Annual Leave approved - Form #${form.formNumber}`,
+            formId: form.id,
+            createdById: session.user.id,
+          },
+        })
+
+        // 6. Update saldo terpakai
+        await tx.leaveBalance.update({
+          where: { id: balance.id },
+          data: {
+            used: {
+              increment: deductionAmount,
+            },
+          },
+        })
+      }
+
+      // 7. Update approval HRD
       await tx.approval.update({
         where: { id: hrdApproval.id },
         data: {
@@ -154,25 +278,35 @@ export async function PATCH(
         },
       })
 
-      // 🔒 FINAL DECISION — KUNCI STATUS FORM
-      return tx.form.update({
+      // 8. Finalisasi form
+      const approvedForm = await tx.form.update({
         where: { id },
         data: { status: "approved" },
         include: { approvals: true },
       })
+
+      return {
+        form: approvedForm,
+        deductionAmount,
+        balanceId,
+      }
     })
 
-    // invalidate cache dashboard
+    // 9. Bersihkan cache
     formCache.clear()
     countCache.clear()
 
     return NextResponse.json({
       success: true,
-      message: "Form approved (FINAL)",
-      status: normalize(result.status),
-      form: result,
+      message: "Form approved successfully",
+      status: normalize(result.form.status),
+      leaveDeduction: result.deductionAmount,
+      balanceId: result.balanceId,
+      form: result.form,
     })
   } catch (e: any) {
+    console.error("Approval error:", e)
+
     return NextResponse.json(
       { error: e.message || "Approval failed" },
       { status: 400 }

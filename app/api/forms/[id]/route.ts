@@ -21,6 +21,16 @@ function canAccessForm(role: string, type?: string) {
   return false
 }
 
+const SPECIAL_LEAVE_LIMITS: Record<string, number> = {
+  Menikah: 3,
+  "Menikahkan anak": 2,
+  "Mengkhitankan anak": 2,
+  "Membaptiskan anak": 2,
+  "Istri melahirkan": 2,
+  "Istri mengalami keguguran": 2,
+  "Keluarga meninggal": 2,
+}
+
 /* =========================
    GET FORM DETAIL
 ========================= */
@@ -68,16 +78,12 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
     (a) => normalize(a.role) === "LEADER" && normalize(a.status) === "APPROVED",
   )
 
-  // HRD bisa approve jika:
-  // 1. Form status masih PENDING
-  // 2. User adalah HRD
-  // 3. LEADER sudah approve (atau tidak ada LEADER approval record)
   const hasLeaderApproval = form.approvals.some(
     (a) => normalize(a.role) === "LEADER",
   )
-  const canApproveForm = 
-    normalize(form.status) === "PENDING" && 
-    role === "HRD" && 
+  const canApproveForm =
+    normalize(form.status) === "PENDING" &&
+    role === "HRD" &&
     (!hasLeaderApproval || leaderApproved)
 
   return NextResponse.json({
@@ -140,6 +146,38 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
         throw new Error("Form already finalized")
       }
 
+      // Pastikan persetujuan Leader sudah selesai jika record Leader tersedia.
+      const leaderApproval = form.approvals.find((a) => normalize(a.role) === "LEADER")
+      if (leaderApproval && normalize(leaderApproval.status) !== "APPROVED") {
+        throw new Error("Leader approval is required before HRD approval")
+      }
+
+      // Validasi Special Leave di sisi server.
+      // Route ini tidak melakukan pemotongan saldo cuti atau gaji.
+      const isLeaveForm = normalize(form.type) === "LEAVE"
+      const leaveData = (form.data ?? {}) as Record<string, any>
+      const isSpecialLeave =
+        isLeaveForm &&
+        String(leaveData.leaveType ?? "").trim().toLowerCase() === "special leave"
+
+      if (isSpecialLeave) {
+        const reason = String(leaveData.specialLeaveReason ?? "").trim()
+        const maxDays = SPECIAL_LEAVE_LIMITS[reason]
+        const requestedDays = Number(leaveData.totalDays ?? leaveData.jumlahHari ?? 0)
+
+        if (!maxDays) {
+          throw new Error("Invalid Special Leave reason")
+        }
+
+        if (!Number.isInteger(requestedDays) || requestedDays <= 0 || requestedDays > maxDays) {
+          throw new Error(`Special Leave for "${reason}" is limited to ${maxDays} day(s)`)
+        }
+
+        if (leaveData.isHalfDay || leaveData.isEarlyLeave) {
+          throw new Error("Special Leave only supports full-day leave, not half-day or early leave")
+        }
+      }
+
       // Cari atau buat HRD approval record
       let hrdApproval = form.approvals.find((a) => normalize(a.role) === "HRD")
 
@@ -156,7 +194,6 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
 
       console.log("[v0] HRD approval found/created:", hrdApproval.id, "Status:", hrdApproval.status)
 
-      // Check jika HRD approval sudah finalized
       if (["APPROVED", "REJECTED"].includes(normalize(hrdApproval.status))) {
         console.log("[v0] HRD approval already finalized:", hrdApproval.status)
         throw new Error("HRD approval already finalized")
@@ -195,7 +232,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
         },
       })
 
-      return { form: updatedForm, approval: updatedApproval }
+      return { form: updatedForm, approval: updatedApproval, isSpecialLeave }
     })
 
     formCache.clear()
@@ -207,6 +244,9 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       success: true,
       message: "Form approved successfully",
       form: result.form,
+      isPaidLeave: result.isSpecialLeave,
+      deductsAnnualLeave: false,
+      salaryDeduction: 0,
     })
   } catch (error: any) {
     console.error("[v0] PATCH error:", error)
@@ -246,11 +286,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       }
 
       if (["APPROVED", "REJECTED"].includes(normalize(form.status))) {
-        console.log("[v0] Form already finalized:", form.status)
         throw new Error("Form already finalized")
       }
 
-      // Cari atau buat HRD approval record
       let hrdApproval = form.approvals.find((a) => normalize(a.role) === "HRD")
 
       if (!hrdApproval) {
@@ -264,9 +302,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         })
       }
 
-      // Check jika HRD approval sudah finalized
       if (["APPROVED", "REJECTED"].includes(normalize(hrdApproval.status))) {
-        console.log("[v0] HRD approval already finalized:", hrdApproval.status)
         throw new Error("HRD approval already finalized")
       }
 

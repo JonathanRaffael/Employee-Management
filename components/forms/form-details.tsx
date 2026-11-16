@@ -262,6 +262,29 @@ const FormDetails = memo(function FormDetails({ form, userRole, userId }: FormDe
 
   const normalize = useCallback((value?: string | null) => value?.toUpperCase() ?? "", [])
 
+  const isSpecialLeave = useMemo(
+    () =>
+      normalize(formData.type) === "LEAVE" &&
+      String(formData.data?.leaveType ?? "").trim().toLowerCase() === "special leave",
+    [formData.type, formData.data, normalize],
+  )
+
+  const specialLeaveReason = String(formData.data?.specialLeaveReason ?? "").trim()
+
+  const specialLeaveMaxDays = useMemo(() => {
+    const limits: Record<string, number> = {
+      Menikah: 3,
+      "Menikahkan anak": 2,
+      "Mengkhitankan anak": 2,
+      "Membaptiskan anak": 2,
+      "Istri melahirkan": 2,
+      "Istri mengalami keguguran": 2,
+      "Keluarga meninggal": 2,
+    }
+
+    return limits[specialLeaveReason] ?? null
+  }, [specialLeaveReason])
+
   const userRoleNormalized = useMemo(() => normalize(userRole), [userRole, normalize])
 
   const approvals = formData.approvals ?? []
@@ -1338,6 +1361,19 @@ if (response.ok && data.form) {
                       <p className="text-xs text-slate-500 dark:text-slate-400">Leave Type</p>
                       <p className="font-medium">{formData.data?.leaveType || "Not specified"}</p>
                     </div>
+                    {isSpecialLeave && (
+                      <div className="col-span-2 rounded-md border border-teal-200 bg-teal-50 p-3 dark:border-teal-800 dark:bg-teal-900/20">
+                        <p className="text-xs text-teal-700 dark:text-teal-300">Special Leave Reason</p>
+                        <p className="mt-1 font-semibold text-teal-900 dark:text-teal-100">
+                          {specialLeaveReason || "Reason not specified"}
+                        </p>
+                        {specialLeaveMaxDays !== null && (
+                          <p className="mt-1 text-xs text-teal-700 dark:text-teal-300">
+                            Maximum allowance: {specialLeaveMaxDays} day(s)
+                          </p>
+                        )}
+                      </div>
+                    )}
                     <div>
                       <p className="text-xs text-slate-500 dark:text-slate-400">Total Days</p>
                       <Badge className="bg-teal-100 text-teal-700 dark:bg-teal-900/30 dark:text-teal-300 hover:bg-teal-200 dark:hover:bg-teal-800/30">
@@ -1378,6 +1414,11 @@ if (response.ok && data.form) {
                       </>
                     )}
                   </div>
+                  {isSpecialLeave && (
+                    <div className="rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800 dark:border-emerald-800 dark:bg-emerald-900/20 dark:text-emerald-300">
+                      Special Leave is paid leave. It does not reduce the employee's annual leave balance or salary.
+                    </div>
+                  )}
                   <div>
                     <p className="text-xs text-slate-500 dark:text-slate-400">Reason</p>
                     <p className="p-3 bg-slate-50 dark:bg-slate-900/50 rounded-md border border-slate-200 dark:border-slate-700 mt-1">

@@ -23,6 +23,19 @@ function canAccessForm(role: string, type?: string) {
   return false
 }
 
+// Batas maksimal Special Leave berdasarkan alasan.
+// Validasi di server tetap dilakukan saat approval agar data tidak bisa
+// melewati aturan meskipun payload form pernah dimanipulasi.
+const SPECIAL_LEAVE_LIMITS: Record<string, number> = {
+  Menikah: 3,
+  "Menikahkan anak": 2,
+  "Mengkhitankan anak": 2,
+  "Membaptiskan anak": 2,
+  "Istri melahirkan": 2,
+  "Istri mengalami keguguran": 2,
+  "Keluarga meninggal": 2,
+}
+
 /* =========================
    GET FORM DETAIL
 ========================= */
@@ -87,7 +100,7 @@ export async function GET(
 
 /* =========================
    PATCH — HRD FINAL APPROVAL
-   WITH AUTOMATIC LEAVE DEDUCTION
+   ANNUAL LEAVE DEDUCTION ONLY
 ========================= */
 export async function PATCH(
   req: NextRequest,
@@ -155,18 +168,50 @@ export async function PATCH(
         throw new Error("HRD already finalized")
       }
 
-      // 3. Proses pemotongan saldo khusus Annual Leave
+      // 3. Tentukan jenis pengajuan cuti
       const isLeaveForm = normalize(form.type) === "LEAVE"
       const leaveData = (form.data ?? {}) as Record<string, any>
+      const leaveType = String(leaveData.leaveType ?? "").trim().toLowerCase()
 
-      const isAnnualLeave =
-        isLeaveForm &&
-        String(leaveData.leaveType ?? "").trim().toLowerCase() ===
-          "annual leave"
+      const isAnnualLeave = isLeaveForm && leaveType === "annual leave"
+      const isSpecialLeave = isLeaveForm && leaveType === "special leave"
 
       let deductionAmount = 0
       let balanceId: string | null = null
 
+      // 4. Special Leave: validasi aturan, tetapi TIDAK memotong saldo cuti tahunan.
+      // Tidak ada pemotongan gaji pada endpoint approval ini.
+      if (isSpecialLeave) {
+        const reason = String(leaveData.specialLeaveReason ?? "").trim()
+        const maxDays = SPECIAL_LEAVE_LIMITS[reason]
+        const requestedDays = Number(
+          leaveData.totalDays ?? leaveData.jumlahHari ?? 0
+        )
+
+        if (!maxDays) {
+          throw new Error("Invalid Special Leave reason")
+        }
+
+        if (
+          !Number.isInteger(requestedDays) ||
+          requestedDays <= 0 ||
+          requestedDays > maxDays
+        ) {
+          throw new Error(
+            `Special Leave for "${reason}" is limited to ${maxDays} day(s)`
+          )
+        }
+
+        if (leaveData.isHalfDay || leaveData.isEarlyLeave) {
+          throw new Error(
+            "Special Leave only supports full-day leave, not half-day or early leave"
+          )
+        }
+
+        // deductionAmount tetap 0 dan balanceId tetap null.
+      }
+
+      // 5. Hanya Annual Leave yang mengurangi saldo cuti tahunan.
       if (isAnnualLeave) {
         if (!form.employeeId) {
           throw new Error("Employee not found on leave form")
@@ -212,7 +257,7 @@ export async function PATCH(
           )
         }
 
-        // 4. Ambil saldo karyawan
+        // 6. Ambil saldo karyawan
         const balance = await tx.leaveBalance.findUnique({
           where: {
             employeeId_year: {
@@ -240,7 +285,7 @@ export async function PATCH(
 
         balanceId = balance.id
 
-        // 5. Catat transaksi pemotongan
+        // 7. Catat transaksi pemotongan
         // formId bersifat UNIQUE sehingga satu form tidak bisa
         // menghasilkan dua transaksi deduction.
         await tx.leaveTransaction.create({
@@ -255,7 +300,7 @@ export async function PATCH(
           },
         })
 
-        // 6. Update saldo terpakai
+        // 8. Update saldo terpakai
         await tx.leaveBalance.update({
           where: { id: balance.id },
           data: {
@@ -266,7 +311,7 @@ export async function PATCH(
         })
       }
 
-      // 7. Update approval HRD
+      // 9. Update approval HRD
       await tx.approval.update({
         where: { id: hrdApproval.id },
         data: {
@@ -278,7 +323,7 @@ export async function PATCH(
         },
       })
 
-      // 8. Finalisasi form
+      // 10. Finalisasi form
       const approvedForm = await tx.form.update({
         where: { id },
         data: { status: "approved" },
@@ -289,10 +334,11 @@ export async function PATCH(
         form: approvedForm,
         deductionAmount,
         balanceId,
+        isSpecialLeave,
       }
     })
 
-    // 9. Bersihkan cache
+    // 11. Bersihkan cache
     formCache.clear()
     countCache.clear()
 
@@ -302,6 +348,9 @@ export async function PATCH(
       status: normalize(result.form.status),
       leaveDeduction: result.deductionAmount,
       balanceId: result.balanceId,
+      isPaidLeave: result.isSpecialLeave,
+      deductsAnnualLeave: result.deductionAmount > 0,
+      salaryDeduction: 0,
       form: result.form,
     })
   } catch (e: any) {

@@ -88,6 +88,7 @@ interface FormState {
 
   // Leave details
   leaveType: string
+  specialLeaveReason: string
   startDate: string
   endDate: string
   totalDays: string
@@ -136,6 +137,7 @@ type FormAction =
   | { type: "SET_EMPLOYEES"; payload: Employee[] }
   | { type: "SET_SELECTED_EMPLOYEE"; payload: DbEmployee | null }
   | { type: "SET_LEAVE_TYPE"; payload: string }
+  | { type: "SET_SPECIAL_LEAVE_REASON"; payload: string }
   | { type: "SET_DATES"; payload: { startDate: string; endDate: string } }
   | { type: "SET_TOTAL_DAYS"; payload: string }
   | { type: "SET_REASON"; payload: string }
@@ -166,6 +168,7 @@ const initialFormState: FormState = {
   employees: [{ name: "", position: "", employeeCode: "", department: "", userId: "" }],
   selectedEmployee: null,
   leaveType: "Annual Leave",
+  specialLeaveReason: "",
   startDate: "",
   endDate: "",
   totalDays: "",
@@ -200,7 +203,13 @@ function formReducer(state: FormState, action: FormAction): FormState {
     case "SET_SELECTED_EMPLOYEE":
       return { ...state, selectedEmployee: action.payload }
     case "SET_LEAVE_TYPE":
-      return { ...state, leaveType: action.payload }
+      return {
+        ...state,
+        leaveType: action.payload,
+        specialLeaveReason: action.payload === "Special Leave" ? state.specialLeaveReason : "",
+      }
+    case "SET_SPECIAL_LEAVE_REASON":
+      return { ...state, specialLeaveReason: action.payload }
     case "SET_DATES":
       return { ...state, startDate: action.payload.startDate, endDate: action.payload.endDate }
     case "SET_TOTAL_DAYS":
@@ -355,6 +364,20 @@ const useLeaveDateValidation = () => {
   return { checkForWeekends, checkForHolidays, checkForHolidaysManual, checkForWeekendsManual }
 }
 
+// Special Leave policy: maximum eligible working days by reason.
+const SPECIAL_LEAVE_OPTIONS = [
+  { value: "Menikah", label: "Menikah", maxDays: 3 },
+  { value: "Menikahkan anak", label: "Menikahkan anak", maxDays: 2 },
+  { value: "Mengkhitankan anak", label: "Mengkhitankan anak", maxDays: 2 },
+  { value: "Membaptiskan anak", label: "Membaptiskan anak", maxDays: 2 },
+  { value: "Istri melahirkan", label: "Istri melahirkan", maxDays: 2 },
+  { value: "Istri mengalami keguguran", label: "Istri mengalami keguguran", maxDays: 2 },
+  { value: "Keluarga meninggal", label: "Keluarga meninggal", maxDays: 2 },
+] as const
+
+const getSpecialLeaveMaxDays = (reason: string) =>
+  SPECIAL_LEAVE_OPTIONS.find((option) => option.value === reason)?.maxDays ?? 0
+
 // Validation functions
 const validateEmployeeInfo = (employees: Employee[]): boolean => {
   return employees.every(
@@ -374,6 +397,7 @@ const validateLeaveDetails = (
   uploadedDocuments: UploadedDocument[],
   dateSelectionMode: DateSelectionMode,
   manualDates: string[],
+  specialLeaveReason: string,
 ): boolean => {
   if (dateSelectionMode === "manual") {
     if (manualDates.length === 0 || !reason) return false
@@ -385,6 +409,15 @@ const validateLeaveDetails = (
   if (leaveType === "Annual Leave") {
     const daysToTake = isHalfDay ? 0.5 : Number(totalDays) || 0
     if (leaveBalance.remaining < 0) return false
+  }
+
+  if (leaveType === "Special Leave") {
+    const maxDays = getSpecialLeaveMaxDays(specialLeaveReason)
+    const requestedDays = Number(totalDays) || 0
+    if (!maxDays || !Number.isInteger(requestedDays) || requestedDays < 1 || requestedDays > maxDays) {
+      return false
+    }
+    if (isHalfDay || !reason.trim()) return false
   }
 
   if (selectedSupportingDocuments.length > 0) {
@@ -756,6 +789,7 @@ export default function LeaveFormComponent({ user }: LeaveFormProps) {
     const draftData = {
       employees: formState.employees,
       leaveType: formState.leaveType,
+      specialLeaveReason: formState.specialLeaveReason,
       startDate: formState.startDate,
       endDate: formState.endDate,
       totalDays: formState.totalDays,
@@ -834,6 +868,19 @@ export default function LeaveFormComponent({ user }: LeaveFormProps) {
         return false
       }
     } else if (formState.currentStep === 2) {
+      // Minimal satu dokumen pendukung wajib dipilih dan benar-benar diunggah.
+      if (
+        formState.selectedSupportingDocuments.length === 0 ||
+        formState.uploadedDocuments.length === 0
+      ) {
+        toast({
+          title: "Supporting Document Required",
+          description: "You must select and upload at least one supporting document before continuing to the signature step.",
+          variant: "destructive",
+        })
+        return false
+      }
+
       if (formState.selectedSupportingDocuments.length > 0) {
         const missingUploads = formState.selectedSupportingDocuments.filter(
           (docType) => !formState.uploadedDocuments.some((uploaded) => uploaded.documentType === docType),
@@ -842,6 +889,19 @@ export default function LeaveFormComponent({ user }: LeaveFormProps) {
           toast({
             title: "Document Upload Required",
             description: `Please upload proof for: ${missingUploads.join(", ")}`,
+            variant: "destructive",
+          })
+          return false
+        }
+      }
+
+      if (formState.leaveType === "Special Leave") {
+        const maxDays = getSpecialLeaveMaxDays(formState.specialLeaveReason)
+        const requestedDays = Number(formState.totalDays) || 0
+        if (!formState.specialLeaveReason || !maxDays || !Number.isInteger(requestedDays) || requestedDays < 1 || requestedDays > maxDays) {
+          toast({
+            title: "Invalid Special Leave Duration",
+            description: `Select a special leave reason and request no more than its maximum allowance${maxDays ? ` (${maxDays} days)` : ""}.`,
             variant: "destructive",
           })
           return false
@@ -861,6 +921,7 @@ export default function LeaveFormComponent({ user }: LeaveFormProps) {
           formState.uploadedDocuments,
           formState.dateSelectionMode,
           formState.manualDates,
+          formState.specialLeaveReason,
         )
       ) {
         toast({
@@ -920,6 +981,12 @@ export default function LeaveFormComponent({ user }: LeaveFormProps) {
           formData: {
             employees: formState.employees,
             leaveType: formState.leaveType,
+            ...(formState.leaveType === "Special Leave" && {
+              specialLeaveReason: formState.specialLeaveReason,
+              specialLeaveMaxDays: getSpecialLeaveMaxDays(formState.specialLeaveReason),
+              isPaidLeave: true,
+              deductsAnnualLeave: false,
+            }),
             startDate: formState.dateSelectionMode === "manual" ? formState.manualDates[0] : formState.startDate,
             endDate:
               formState.dateSelectionMode === "manual"
@@ -1352,10 +1419,8 @@ export default function LeaveFormComponent({ user }: LeaveFormProps) {
                             { value: "Annual Leave", id: "annual", icon: "🏖️" },
                             { value: "Unpaid Leave", id: "unpaid", icon: "💸" },
                             { value: "Sick Leave", id: "sick", icon: "🏥" },
-                            { value: "Bereavement", id: "bereavement", icon: "💐" },
-                            { value: "Maternity Leave", id: "maternity", icon: "👶" },
-                            { value: "Marriage Leave", id: "marriage", icon: "💍" },
                             { value: "Other", id: "other", icon: "📝" },
+                            { value: "Special Leave", id: "special-leave", icon: "📌" },
                           ].map((item) => (
                             <div
                               key={item.id}
@@ -1373,6 +1438,37 @@ export default function LeaveFormComponent({ user }: LeaveFormProps) {
                             </div>
                           ))}
                         </RadioGroup>
+
+                        {formState.leaveType === "Special Leave" && (
+                          <div className="mt-4 rounded-md border border-teal-200 bg-teal-50/60 p-3 dark:border-teal-800 dark:bg-teal-900/10">
+                            <Label htmlFor="specialLeaveReason" className="mb-2 block text-sm font-medium">
+                              Jenis Izin Khusus (Special Leave)
+                            </Label>
+                            <select
+                              id="specialLeaveReason"
+                              value={formState.specialLeaveReason}
+                              onChange={(e) =>
+                                dispatch({ type: "SET_SPECIAL_LEAVE_REASON", payload: e.target.value })
+                              }
+                              className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-200 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+                              required
+                            >
+                              <option value="">Pilih alasan izin khusus</option>
+                              {SPECIAL_LEAVE_OPTIONS.map((option) => (
+                                <option key={option.value} value={option.value}>
+                                  {option.label} — Maks. {option.maxDays} hari
+                                </option>
+                              ))}
+                            </select>
+                            {formState.specialLeaveReason && (
+                              <p className="mt-2 text-xs text-teal-700 dark:text-teal-300">
+                                Maksimal pengajuan untuk alasan ini:{" "}
+                                <strong>{getSpecialLeaveMaxDays(formState.specialLeaveReason)} hari</strong>.
+                                Izin khusus tidak mengurangi saldo cuti tahunan dan tidak memotong gaji.
+                              </p>
+                            )}
+                          </div>
+                        )}
                       </div>
                     </div>
 
@@ -1397,8 +1493,11 @@ export default function LeaveFormComponent({ user }: LeaveFormProps) {
                           <line x1="16" x2="8" y1="17" y2="17" />
                           <line x1="10" x2="8" y1="9" y2="9" />
                         </svg>
-                        Supporting Documents
+                        Supporting Documents <span className="text-red-500">*</span>
                       </h3>
+                      <p className="mb-3 text-xs text-slate-600 dark:text-slate-400">
+                        Wajib melampirkan minimal satu dokumen pendukung. Pilih jenis dokumen, lalu unggah file sebelum melanjutkan ke tahap tanda tangan.
+                      </p>
                       <div className="bg-white dark:bg-slate-800 p-4 rounded-md border shadow-sm hover:shadow-md transition-all duration-300">
                         <div className="flex flex-col space-y-2">
                           {[
@@ -1582,6 +1681,11 @@ export default function LeaveFormComponent({ user }: LeaveFormProps) {
                       Period of Leave Application
                     </h3>
                     <div className="bg-white dark:bg-slate-800 p-4 rounded-md border shadow-sm hover:shadow-md transition-all duration-300">
+                      {formState.leaveType !== "Sick Leave" && (
+                        <div className="mb-3 rounded-md border border-blue-200 bg-blue-50 p-3 text-sm text-blue-800 dark:border-blue-800 dark:bg-blue-900/20 dark:text-blue-300">
+                          <strong>Catatan:</strong> Pengajuan cuti sebaiknya disampaikan minimal <strong>14 hari kalender (2 minggu)</strong> sebelum tanggal mulai cuti agar proses administrasi dan persetujuan dapat dipersiapkan. Jika pengajuan mendadak atau terdapat keterlambatan input ke sistem, user tetap dapat mengajukan cuti dan melanjutkan proses.
+                        </div>
+                      )}
                       {supportsManualDates && (
                         <div className="mb-4">
                           <Label className="text-sm font-medium mb-2 block">Date Selection Mode</Label>
@@ -1635,7 +1739,7 @@ export default function LeaveFormComponent({ user }: LeaveFormProps) {
                                   <Input
                                     id="startDate"
                                     type="date"
-                                    value={formState.startDate}
+                                                                        value={formState.startDate}
                                     onChange={(e) => {
                                       dispatch({
                                         type: "SET_DATES",
@@ -1742,7 +1846,7 @@ export default function LeaveFormComponent({ user }: LeaveFormProps) {
                                       <Input
                                         id="manualDateInput"
                                         type="date"
-                                        value={manualDateInput}
+                                                                                value={manualDateInput}
                                         onChange={(e) => setManualDateInput(e.target.value)}
                                         className="flex-1 transition-all duration-200 focus:border-teal-300 focus:ring-teal-200 border-slate-300 dark:border-slate-700"
                                       />
@@ -1898,7 +2002,7 @@ export default function LeaveFormComponent({ user }: LeaveFormProps) {
                             <Input
                               id="startDate"
                               type="date"
-                              value={formState.startDate}
+                                                            value={formState.startDate}
                               onChange={(e) => {
                                 dispatch({
                                   type: "SET_DATES",
@@ -2035,7 +2139,7 @@ export default function LeaveFormComponent({ user }: LeaveFormProps) {
                             </svg>
                             Half-Day Option
                           </Label>
-                          {formState.leaveType !== "Annual Leave" ? (
+                          {formState.leaveType !== "Annual Leave" && formState.leaveType !== "Special Leave" ? (
                             <div className="flex flex-col sm:flex-row sm:items-center space-y-2 sm:space-y-0 sm:space-x-4">
                               <div className="flex items-center space-x-2">
                                 <Checkbox
@@ -2088,7 +2192,9 @@ export default function LeaveFormComponent({ user }: LeaveFormProps) {
                           ) : (
                             <div className="p-3 bg-gray-50 dark:bg-slate-900/50 rounded-md border border-gray-200 dark:border-slate-700">
                               <p className="text-sm text-gray-500 dark:text-gray-400">
-                                Half-day option is not available for Annual Leave requests.
+                                {formState.leaveType === "Special Leave"
+                                  ? "Half-day option is not available for Special Leave requests."
+                                  : "Half-day option is not available for Annual Leave requests."}
                               </p>
                             </div>
                           )}
@@ -2687,6 +2793,19 @@ export default function LeaveFormComponent({ user }: LeaveFormProps) {
                       <div>
                         <span className="text-teal-600 dark:text-teal-400">Leave Type:</span> {formState.leaveType}
                       </div>
+                      {formState.leaveType === "Special Leave" && (
+                        <div className="sm:col-span-2">
+                          <span className="text-teal-600 dark:text-teal-400">Special Leave Reason:</span>{" "}
+                          <strong className="font-semibold text-teal-800 dark:text-teal-200">
+                            {formState.specialLeaveReason || "Belum dipilih"}
+                          </strong>
+                          {formState.specialLeaveReason && (
+                            <span className="ml-2 text-xs text-teal-700 dark:text-teal-300">
+                              (Maks. {getSpecialLeaveMaxDays(formState.specialLeaveReason)} hari)
+                            </span>
+                          )}
+                        </div>
+                      )}
                       <div>
                         <span className="text-teal-600 dark:text-teal-400">Total Days:</span>{" "}
                         {formState.isHalfDay
@@ -2736,7 +2855,7 @@ export default function LeaveFormComponent({ user }: LeaveFormProps) {
                           {formState.selectedSupportingDocuments.join(", ")}
                         </div>
                       )}
-                      {formState.selectedEmployee && (
+                      {formState.selectedEmployee && formState.leaveType !== "Special Leave" && (
                         <div className="sm:col-span-2">
                           <span className="text-teal-600 dark:text-teal-400">Remaining Leave After Request:</span>{" "}
                           <span
@@ -2755,7 +2874,9 @@ export default function LeaveFormComponent({ user }: LeaveFormProps) {
                       )}
                       <div className="sm:col-span-2 mt-2 text-gray-600 dark:text-gray-400 text-xs">
                         <AlertCircle className="h-4 w-4 inline-block mr-1 text-teal-500" />
-                        Leave balance will be updated when your request is approved by management.
+                        {formState.leaveType === "Special Leave"
+                          ? "Special Leave is paid leave for an approved special reason. It does not reduce annual leave balance or salary."
+                          : "Leave balance will be updated when your request is approved by management."}
                       </div>
                     </div>
                   </motion.div>

@@ -35,6 +35,13 @@ interface UploadedDocumentFile {
 interface LeaveFormData {
   employees: { name: string; position: string; employeeCode: string; department: string }[]
   leaveType: string
+  specialLeaveReason?: string
+  specialLeaveMaxDays?: number
+  isPaidLeave?: boolean
+  deductsAnnualLeave?: boolean
+  salaryDeduction?: number
+  isHalfDay?: boolean
+  isEarlyLeave?: boolean
   startDate: string
   endDate: string
   totalDays: string
@@ -52,6 +59,17 @@ interface FormSubmissionData {
   signature: string
   supportingDocuments: string[]
   jumlahHariCuti: number
+}
+
+// Server-side limits for Special Leave. Never rely on limits sent by the client.
+const SPECIAL_LEAVE_LIMITS: Record<string, number> = {
+  Menikah: 3,
+  "Menikahkan anak": 2,
+  "Mengkhitankan anak": 2,
+  "Membaptiskan anak": 2,
+  "Istri melahirkan": 2,
+  "Istri mengalami keguguran": 2,
+  "Keluarga meninggal": 2,
 }
 
 // Optimized cache with better performance
@@ -485,6 +503,75 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Form data is required" }, { status: 400 })
     }
 
+    // ==========================================
+    // SPECIAL LEAVE SERVER-SIDE VALIDATION
+    // ==========================================
+    if (data.type === "leave" && formData.leaveType === "Special Leave") {
+      const specialLeaveReason = String(formData.specialLeaveReason || "").trim()
+      const maxDays = SPECIAL_LEAVE_LIMITS[specialLeaveReason]
+      const requestedDays = Number(formData.totalDays)
+
+      if (!maxDays) {
+        return NextResponse.json(
+          { error: "Invalid or missing Special Leave reason." },
+          { status: 400 },
+        )
+      }
+
+      if (!Number.isInteger(requestedDays) || requestedDays <= 0) {
+        return NextResponse.json(
+          { error: "Special Leave must use a valid full-day duration." },
+          { status: 400 },
+        )
+      }
+
+      if (requestedDays > maxDays) {
+        return NextResponse.json(
+          {
+            error: `Maximum allowed duration for ${specialLeaveReason} is ${maxDays} days.`,
+            maxDays,
+            requestedDays,
+          },
+          { status: 400 },
+        )
+      }
+
+      if (formData.isHalfDay || formData.isEarlyLeave) {
+        return NextResponse.json(
+          { error: "Special Leave does not support half-day or early-leave requests." },
+          { status: 400 },
+        )
+      }
+
+      if (formData.dateSelectionMode === "manual" || !formData.startDate || !formData.endDate) {
+        return NextResponse.json(
+          { error: "Special Leave requires a valid date range." },
+          { status: 400 },
+        )
+      }
+
+      const startDate = new Date(formData.startDate)
+      const endDate = new Date(formData.endDate)
+      if (
+        !Number.isFinite(startDate.getTime()) ||
+        !Number.isFinite(endDate.getTime()) ||
+        startDate > endDate
+      ) {
+        return NextResponse.json(
+          { error: "Invalid Special Leave date range." },
+          { status: 400 },
+        )
+      }
+
+      // These values are controlled by the server, not by the browser.
+      formData.specialLeaveReason = specialLeaveReason
+      formData.specialLeaveMaxDays = maxDays
+      formData.isPaidLeave = true
+      formData.deductsAnnualLeave = false
+      formData.salaryDeduction = 0
+      delete formData.leaveBalance
+    }
+
     // =========================
     // EMPLOYEE LOOKUP (FIXED)
     // =========================
@@ -523,9 +610,21 @@ export async function POST(request: Request) {
    LEAVE CALCULATION
 ================================================= */
     if (data.type === "leave") {
-      const jumlahHari = data.jumlahHariCuti || Number.parseInt(formData?.totalDays || "0") || 0
+      const isSpecialLeave = formData.leaveType === "Special Leave"
+      // For Special Leave, use the validated full-day value from the form data.
+      // Do not let jumlahHariCuti from the client override the validated duration.
+      const jumlahHari = isSpecialLeave
+        ? Number(formData.totalDays)
+        : Number(data.jumlahHariCuti) || Number.parseFloat(formData?.totalDays || "0") || 0
 
       formData.jumlahHari = jumlahHari
+
+      if (isSpecialLeave) {
+        formData.isPaidLeave = true
+        formData.deductsAnnualLeave = false
+        formData.salaryDeduction = 0
+        delete formData.leaveBalance
+      }
     }
 
     /* =================================================

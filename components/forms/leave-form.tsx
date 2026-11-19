@@ -378,6 +378,10 @@ const SPECIAL_LEAVE_OPTIONS = [
 const getSpecialLeaveMaxDays = (reason: string) =>
   SPECIAL_LEAVE_OPTIONS.find((option) => option.value === reason)?.maxDays ?? 0
 
+// Supporting documents are mandatory only for these leave types.
+const requiresSupportingDocuments = (leaveType: string): boolean =>
+  ["Sick Leave", "Other", "Special Leave"].includes(leaveType)
+
 // Validation functions
 const validateEmployeeInfo = (employees: Employee[]): boolean => {
   return employees.every(
@@ -420,6 +424,13 @@ const validateLeaveDetails = (
     if (isHalfDay || !reason.trim()) return false
   }
 
+  if (requiresSupportingDocuments(leaveType)) {
+    if (selectedSupportingDocuments.length === 0 || uploadedDocuments.length === 0) {
+      return false
+    }
+  }
+
+  // Any document selected by the user must be uploaded, even when attachments are optional.
   if (selectedSupportingDocuments.length > 0) {
     const allDocumentsUploaded = selectedSupportingDocuments.every((docType) =>
       uploadedDocuments.some((uploaded) => uploaded.documentType === docType),
@@ -446,6 +457,7 @@ const validateSignature = (
 
 // Main component
 export default function LeaveFormComponent({ user }: LeaveFormProps) {
+  const [showSupportingDocumentError, setShowSupportingDocumentError] = useState(false)
   const router = useRouter()
   const { toast } = useToast()
   const signatureRef = useRef<SignatureCanvas>(null)
@@ -725,15 +737,23 @@ export default function LeaveFormComponent({ user }: LeaveFormProps) {
             preview,
           }
           const updatedDocs = formState.uploadedDocuments.filter((doc) => doc.documentType !== documentType)
+          const nextUploadedDocs = [...updatedDocs, newDoc]
           dispatch({
             type: "SET_UPLOADED_DOCUMENTS",
-            payload: [...updatedDocs, newDoc],
+            payload: nextUploadedDocs,
           })
+
+          const allSelectedDocsUploaded = formState.selectedSupportingDocuments.every((selectedType) =>
+            nextUploadedDocs.some((uploaded) => uploaded.documentType === selectedType),
+          )
+          if (allSelectedDocsUploaded && nextUploadedDocs.length > 0) {
+            setShowSupportingDocumentError(false)
+          }
         }
         reader.readAsDataURL(file)
       }
     },
-    [formState.uploadedDocuments],
+    [formState.uploadedDocuments, formState.selectedSupportingDocuments],
   )
 
   const handleRemoveDocument = useCallback(
@@ -868,14 +888,17 @@ export default function LeaveFormComponent({ user }: LeaveFormProps) {
         return false
       }
     } else if (formState.currentStep === 2) {
-      // Minimal satu dokumen pendukung wajib dipilih dan benar-benar diunggah.
+      // Supporting documents are mandatory only for Sick Leave, Other, and Special Leave.
       if (
-        formState.selectedSupportingDocuments.length === 0 ||
-        formState.uploadedDocuments.length === 0
+        requiresSupportingDocuments(formState.leaveType) &&
+        (formState.selectedSupportingDocuments.length === 0 ||
+          formState.uploadedDocuments.length === 0)
       ) {
+        setShowSupportingDocumentError(true)
         toast({
           title: "Supporting Document Required",
-          description: "You must select and upload at least one supporting document before continuing to the signature step.",
+          description:
+            "For this leave type, you must select and upload at least one supporting document before continuing to the signature step.",
           variant: "destructive",
         })
         return false
@@ -886,6 +909,9 @@ export default function LeaveFormComponent({ user }: LeaveFormProps) {
           (docType) => !formState.uploadedDocuments.some((uploaded) => uploaded.documentType === docType),
         )
         if (missingUploads.length > 0) {
+          if (requiresSupportingDocuments(formState.leaveType)) {
+            setShowSupportingDocumentError(true)
+          }
           toast({
             title: "Document Upload Required",
             description: `Please upload proof for: ${missingUploads.join(", ")}`,
@@ -1097,6 +1123,13 @@ export default function LeaveFormComponent({ user }: LeaveFormProps) {
   const [manualDateInput, setManualDateInput] = useState("")
 
   const supportsManualDates = formState.leaveType === "Annual Leave" || formState.leaveType === "Marriage Leave"
+  const isSupportingDocumentRequired = requiresSupportingDocuments(formState.leaveType)
+
+  useEffect(() => {
+    if (!isSupportingDocumentRequired) {
+      setShowSupportingDocumentError(false)
+    }
+  }, [isSupportingDocumentRequired])
 
   return (
     <div className="min-h-screen bg-teal-50/50 dark:bg-slate-900 py-4 px-4 sm:py-8 sm:px-6 lg:px-8">
@@ -1493,11 +1526,36 @@ export default function LeaveFormComponent({ user }: LeaveFormProps) {
                           <line x1="16" x2="8" y1="17" y2="17" />
                           <line x1="10" x2="8" y1="9" y2="9" />
                         </svg>
-                        Supporting Documents <span className="text-red-500">*</span>
+                        Supporting Documents
+                        {isSupportingDocumentRequired && <span className="text-red-500 ml-1">*</span>}
+                        {!isSupportingDocumentRequired && (
+                          <span className="ml-2 text-xs font-normal text-slate-500">(Optional)</span>
+                        )}
                       </h3>
                       <p className="mb-3 text-xs text-slate-600 dark:text-slate-400">
-                        Wajib melampirkan minimal satu dokumen pendukung. Pilih jenis dokumen, lalu unggah file sebelum melanjutkan ke tahap tanda tangan.
+                        {isSupportingDocumentRequired
+                          ? "Wajib melampirkan minimal satu dokumen pendukung. Pilih jenis dokumen, lalu unggah file sebelum melanjutkan ke tahap tanda tangan."
+                          : "Dokumen pendukung tidak wajib untuk jenis cuti ini. Anda dapat melampirkannya jika diperlukan."}
                       </p>
+                      {isSupportingDocumentRequired && showSupportingDocumentError && (
+                        <motion.div
+                          initial={{ opacity: 0, y: -8 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          role="alert"
+                          aria-live="assertive"
+                          className="mb-3 flex items-start gap-3 rounded-lg border border-red-300 bg-red-50 p-3 text-red-800 dark:border-red-800 dark:bg-red-950/30 dark:text-red-300"
+                        >
+                          <AlertCircle className="mt-0.5 h-5 w-5 flex-shrink-0" />
+                          <div>
+                            <p className="text-sm font-semibold">Dokumen pendukung wajib dilampirkan</p>
+                            <p className="mt-1 text-xs leading-relaxed">
+                              Anda memilih {formState.leaveType}. Silakan pilih jenis dokumen dan unggah minimal satu
+                              file pendukung sebelum menekan Next Step. Form belum dapat dilanjutkan tanpa dokumen.
+                            </p>
+                          </div>
+                        </motion.div>
+                      )}
+
                       <div className="bg-white dark:bg-slate-800 p-4 rounded-md border shadow-sm hover:shadow-md transition-all duration-300">
                         <div className="flex flex-col space-y-2">
                           {[
@@ -1662,7 +1720,7 @@ export default function LeaveFormComponent({ user }: LeaveFormProps) {
                                   (docType) => !isDocumentUploaded(docType),
                                 ) && (
                                   <p className="text-xs text-red-600 dark:text-red-400 mt-2 font-medium">
-                                    ⚠️ Semua dokumen yang dipilih harus diupload sebelum melanjutkan ke langkah
+                                    ⚠️ Setiap dokumen yang dipilih harus diupload sebelum melanjutkan ke langkah
                                     berikutnya.
                                   </p>
                                 )}

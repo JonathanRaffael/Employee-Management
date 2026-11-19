@@ -59,6 +59,8 @@ interface FormSubmissionData {
   signature: string
   supportingDocuments: string[]
   jumlahHariCuti: number
+  employeeId?: string
+  createdById?: string
 }
 
 // Server-side limits for Special Leave. Never rely on limits sent by the client.
@@ -573,28 +575,40 @@ export async function POST(request: Request) {
     }
 
     // =========================
-    // EMPLOYEE LOOKUP (FIXED)
+    // EMPLOYEE LOOKUP
     // =========================
-    let employee = await prisma.employee.findUnique({
-      where: { userId: user.id },
-    })
+    // For leave forms, employeeId comes from the employee selected in
+    // the Leave Form UI. createdBy remains the authenticated user below.
+    // For other form types (and older leave-form clients), retain the
+    // existing behavior of associating the form with the logged-in user.
+    const requestedEmployeeId =
+      data.type === "leave" && typeof data.employeeId === "string"
+        ? data.employeeId.trim()
+        : ""
 
-    // (lanjutkan kode lu setelah ini tanpa diubah)
+    let employee = requestedEmployeeId
+      ? await prisma.employee.findUnique({
+          where: { id: requestedEmployeeId },
+        })
+      : await prisma.employee.findUnique({
+          where: { userId: user.id },
+        })
 
-    /* =================================================
-   ENSURE EMPLOYEE EXISTS (DECLARE ONCE)
-================================================= */
-    employee = await prisma.employee.findUnique({
-      where: { userId: session.user.id },
-    })
+    if (requestedEmployeeId && !employee) {
+      return NextResponse.json(
+        { error: "Selected employee was not found. Please refresh the employee list and try again." },
+        { status: 404 },
+      )
+    }
 
+    // Keep legacy behavior for submissions that do not send employeeId.
     if (!employee) {
       const employeeCount = await prisma.employee.count()
       const employeeCode = `EMP${String(employeeCount + 1).padStart(4, "0")}`
 
       employee = await prisma.employee.create({
         data: {
-          userId: session.user.id,
+          userId: user.id,
           employeeCode,
           name: user.name ?? "Unknown",
           department: user.department ?? "Unknown",
@@ -603,7 +617,7 @@ export async function POST(request: Request) {
         },
       })
 
-      console.log(`✅ Created Employee ${employee.employeeCode} for user ${session.user.id}`)
+      console.log(`✅ Created Employee ${employee.employeeCode} for user ${user.id}`)
     }
 
     /* =================================================

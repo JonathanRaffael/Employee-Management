@@ -8,13 +8,10 @@ export async function GET(request: Request) {
 
     const query = searchParams.get("q")?.trim() || ""
     const dept = searchParams.get("dept") || ""
-
-    // Default tetap Active untuk kompatibilitas API lama.
     const requestedStatus = searchParams.get("status") || "active"
 
     const year = new Date().getFullYear()
 
-    // Pagination
     const paginationRequested =
       searchParams.has("page") || searchParams.has("limit")
 
@@ -31,7 +28,6 @@ export async function GET(request: Request) {
       )
     )
 
-    // Filter pencarian dan department
     const baseWhere = {
       ...(query
         ? {
@@ -54,7 +50,6 @@ export async function GET(request: Request) {
       ...(dept ? { department: dept } : {}),
     }
 
-    // Filter status
     const statusWhere =
       requestedStatus === "all"
         ? {}
@@ -67,62 +62,66 @@ export async function GET(request: Request) {
       ...statusWhere,
     }
 
-    // Ambil data employee dan jumlah berdasarkan status.
-    const [employees, total, activeCount, inactiveCount, departments] =
-      await Promise.all([
-        prisma.employee.findMany({
-          where,
-          select: {
-            id: true,
-            employeeCode: true,
-            name: true,
-            department: true,
-            position: true,
-            isActive: true,
-            createdAt: true,
-          },
-          orderBy: {
-            name: "asc",
-          },
-          ...(paginationRequested
-            ? {
-                skip: (page - 1) * limit,
-                take: limit,
-              }
-            : {}),
-        }),
+    // Fetch employee data and statistics.
+    const [
+      employees,
+      total,
+      statusGroups,
+      departments,
+    ] = await Promise.all([
+      prisma.employee.findMany({
+        where,
+        select: {
+          id: true,
+          employeeCode: true,
+          name: true,
+          department: true,
+          position: true,
+          isActive: true,
+          createdAt: true,
+        },
+        orderBy: {
+          name: "asc",
+        },
+        ...(paginationRequested
+          ? {
+              skip: (page - 1) * limit,
+              take: limit,
+            }
+          : {}),
+      }),
 
-        prisma.employee.count({
-          where,
-        }),
+      prisma.employee.count({
+        where,
+      }),
 
-        prisma.employee.count({
-          where: {
-            ...baseWhere,
-            isActive: true,
-          },
-        }),
+      prisma.employee.groupBy({
+        by: ["isActive"],
+        where: baseWhere,
+        _count: {
+          _all: true,
+        },
+      }),
 
-        prisma.employee.count({
-          where: {
-            ...baseWhere,
-            isActive: false,
-          },
-        }),
+      prisma.employee.findMany({
+        where: baseWhere,
+        select: {
+          department: true,
+        },
+        distinct: ["department"],
+        orderBy: {
+          department: "asc",
+        },
+      }),
+    ])
 
-        prisma.employee.findMany({
-          where: baseWhere,
-          select: {
-            department: true,
-          },
-          distinct: ["department"],
-          orderBy: {
-            department: "asc",
-          },
-        }),
-      ])
+    const activeCount =
+      statusGroups.find((item) => item.isActive)?._count._all ?? 0
 
-    // Ambil saldo cuti tahun berjalan
+    const inactiveCount =
+      statusGroups.find((item) => !item.isActive)?._count._all ?? 0
+
+    // Fetch leave balances only for employees on this page.
     const leaveBalances =
       employees.length > 0
         ? await prisma.leaveBalance.findMany({
@@ -147,7 +146,6 @@ export async function GET(request: Request) {
       ])
     )
 
-    // Gabungkan employee dengan saldo cuti
     const result = employees.map((employee) => {
       const balance = balanceMap.get(employee.id)
 
@@ -160,10 +158,7 @@ export async function GET(request: Request) {
         name: employee.name,
         department: employee.department,
         position: employee.position,
-
-        // Penting: status dikirim ke frontend.
         isActive: employee.isActive,
-
         createdAt: employee.createdAt,
 
         leave: {
@@ -175,13 +170,11 @@ export async function GET(request: Request) {
       }
     })
 
-    // Jika dipanggil API lama tanpa pagination,
-    // tetap kembalikan array agar kompatibel.
+    // Preserve compatibility with existing API consumers.
     if (!paginationRequested) {
       return NextResponse.json(result)
     }
 
-    // Response khusus Employee Management.
     return NextResponse.json({
       employees: result,
       total,

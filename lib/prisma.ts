@@ -5,7 +5,7 @@ const IS_DEV = process.env.NODE_ENV === "development"
 const ENABLE_QUERY_LOG = process.env.QUERY_LOG === "1"
 const SLOW_MS = Number(process.env.SLOW_QUERY_MS ?? "150")
 
-const globalForPrisma = globalThis as unknown as {
+const globalForPrisma = globalThis as typeof globalThis & {
   prismaBase?: PrismaClient
   prisma?: PrismaClient
 }
@@ -25,9 +25,11 @@ function createBaseClient() {
   })
 }
 
+// Reuse the same base Prisma client.
 const base =
   globalForPrisma.prismaBase ?? createBaseClient()
 
+// Reuse the extended Prisma client.
 const extended =
   globalForPrisma.prisma ??
   (base.$extends({
@@ -50,11 +52,9 @@ const extended =
     },
   }) as unknown as PrismaClient)
 
-// Cache during development to prevent hot-reload instances.
-if (IS_DEV) {
-  globalForPrisma.prismaBase = base
-  globalForPrisma.prisma = extended
-}
+// Cache in ALL environments, including production.
+globalForPrisma.prismaBase = base
+globalForPrisma.prisma = extended
 
 export const prismaBase = base
 export const prisma = extended
